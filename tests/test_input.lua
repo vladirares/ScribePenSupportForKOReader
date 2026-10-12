@@ -313,4 +313,38 @@ do
     equal(decoder:isContact(), false, "last logged rear hover is lifted")
 end
 
+-- Tool-key chatter must not turn a held physical rear eraser into a pen.
+-- Releasing a contact emits UP once, then a later hover, never both at once.
+do
+    local _, out, feed, report = harness({ emit_hover=true })
+    feed(C.EV_KEY,C.BTN_TOOL_RUBBER,1)
+    feed(C.EV_ABS,C.ABS_X,100)
+    feed(C.EV_ABS,C.ABS_Y,200)
+    report()
+    equal(#out,1,"proximity produces exactly one noncontact preview")
+    equal(out[1].phase,"hover")
+    equal(out[1].eraser,true)
+    feed(C.EV_KEY,C.BTN_TOUCH,1)
+    report()
+    equal(out[2].phase,"down")
+    equal(out[2].eraser,true)
+    feed(C.EV_KEY,C.BTN_TOOL_RUBBER,0)
+    feed(C.EV_KEY,C.BTN_TOOL_PEN,1)
+    report()
+    equal(out[3].phase,"move","temporary tool-key switch does not split contact")
+    equal(out[3].eraser,true,"temporary pen key does not turn rubber into ink")
+    feed(C.EV_ABS,C.ABS_X,115)
+    report()
+    equal(out[4].phase,"move")
+    equal(out[4].eraser,true)
+    feed(C.EV_KEY,C.BTN_TOUCH,0)
+    report()
+    equal(#out,5,"release does not also emit hover")
+    equal(out[5].phase,"up")
+    equal(out[5].eraser,true)
+    feed(C.EV_ABS,C.ABS_X,120)
+    report()
+    equal(out[6].phase,"hover","moving in air after release previews the new tool")
+    equal(out[6].eraser,false)
+end
 return checks

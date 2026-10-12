@@ -832,17 +832,25 @@ local copies_before_erase=framebuffer_copies
 local blits_before_erase=#native_blits
 local circles_before_erase=#native_circles
 tapButton(persistent_overlay,"Erase")
--- Moving the eraser in the air must not refresh the display or mutate ink.
+-- Hover previews the eraser without changing saved ink or flashing the display.
 plugin:flushInkRefresh()
 local no_contact_refreshes=#refreshes
 local no_contact_count=#store:page(1)
 plugin:penEvent{phase="hover",x=105,y=210,eraser=false}
 plugin:flushInkRefresh()
-check(#refreshes==no_contact_refreshes and #store:page(1)==no_contact_count
-    and not plugin.eraser_cursor, "hover is silent and never erases")
+check(#refreshes==no_contact_refreshes+1 and #store:page(1)==no_contact_count
+    and plugin.eraser_cursor and plugin.eraser_cursor.hover
+    and refreshes[#refreshes].mode=="fast",
+    "hover shows a sparse non-destructive preview with no flashing waveform")
+local after_preview=#refreshes
+plugin:penEvent{phase="hover",x=105,y=210,eraser=false}
+plugin:flushInkRefresh()
+check(#refreshes==after_preview,"unchanged hover does not request another screen update")
 check(Manager:displayPixel(100,210)==0, "erasure begins from actually presented handwriting")
 plugin:penEvent{phase="down",x=105,y=210,eraser=false}
 plugin:pollPen()
+check(plugin.eraser_cursor and not plugin.eraser_cursor.hover,
+    "contact replaces hover preview with the white eraser at identical coordinates")
 local radius=plugin:eraserRadius()
 check(#native_circles>circles_before_erase and Screen.bb:pixel(105,210)==255
     and Screen.bb:pixel(105+radius-1,210)==255,
@@ -892,9 +900,15 @@ check(Manager:displayPixel(110,210)==77 and Manager:displayPixel(140,210)==0
     and not plugin.eraser_cursor and plugin.eraser_cleanup_rect==nil,
     "release leaves the PDF and surviving ink visible, with no eraser outline")
 local after_release=#refreshes
+plugin.last_eraser_hover=nil
 plugin:penEvent{phase="hover",x=105,y=210,eraser=false}
 plugin:pollPen()
-check(#refreshes==after_release, "hover after release stays refresh-free")
+check(#refreshes==after_release+1 and plugin.eraser_cursor
+    and plugin.eraser_cursor.hover and refreshes[#refreshes].mode=="fast",
+    "after cleanup hover again previews without erasing or flashing")
+plugin:penEvent{phase="leave"}
+plugin:pollPen()
+check(not plugin.eraser_cursor,"leaving proximity clears the hover preview")
 tapButton(persistent_overlay,"Pen")
 drawStroke(200,260,220,260)
 local count_before_rear=#store:page(1)

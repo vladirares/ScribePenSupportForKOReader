@@ -305,14 +305,23 @@ function Ink:paintEraserCursor(bb,x,y)
     local cursor=self.eraser_cursor
     if not cursor then return end
     local cx,cy=math.floor(cursor.x+(x or 0)+0.5),math.floor(cursor.y+(y or 0)+0.5)
-    -- Opaque white, not a dark outline: the temporary mask shows the exact
-    -- circular contact footprint. The underlying PDF is restored on movement
-    -- or release from clean_bb, so this never changes the PDF itself.
-    bb:paintCircle(cx,cy,cursor.radius,Blitbuffer.COLOR_WHITE)
+    if cursor.hover then
+        -- Sparse preview ticks: visible over white paper, much less ghosting
+        -- than a solid black ring. Preview NEVER changes the stored strokes.
+        for degrees=0,330,30 do
+            local angle=degrees*math.pi/180
+            local px=math.floor(cx+cursor.radius*math.cos(angle)+0.5)
+            local py=math.floor(cy+cursor.radius*math.sin(angle)+0.5)
+            bb:paintRect(px,py,1,1,Blitbuffer.COLOR_BLACK)
+        end
+    else
+        -- Only physical contact paints the filled white eraser footprint.
+        bb:paintCircle(cx,cy,cursor.radius,Blitbuffer.COLOR_WHITE)
+    end
 end
 -- Recompose from the clean PDF snapshot, not from a screenshot containing old
 -- ink. Both the cut and the cursor move are painted into Screen.bb immediately.
-function Ink:updateEraserCursor(screen,changed_bounds,transform)
+function Ink:updateEraserCursor(screen,changed_bounds,transform,hover)
     local old=self.eraser_cursor
     local cursor
     if screen then
@@ -320,7 +329,7 @@ function Ink:updateEraserCursor(screen,changed_bounds,transform)
         local r=self:eraserRadius()
         if Geometry.intersectsBounds({x=screen.x-r,y=screen.y-r,w=2*r,h=2*r},clip)
             and not self.overlay.toolbar:hitTest(screen.x,screen.y) then
-            cursor={x=screen.x,y=screen.y,radius=r}
+            cursor={x=screen.x,y=screen.y,radius=r,hover=hover==true}
         end
     end
     local changed_rect
@@ -330,15 +339,13 @@ function Ink:updateEraserCursor(screen,changed_bounds,transform)
         local b={x=a.x+changed_bounds.w*transform.zoom,y=a.y+changed_bounds.h*transform.zoom}
         changed_rect=Render.bounds(a,b,4,self:clip())
     end
-    -- No repaint for repeated contact samples at an unchanged location.
-    -- In particular, hovering must never drive screen refreshes.
+    -- Repaint only for real position/mode changes, not every raw hover frame.
     local cursor_rect=unionRect(self:cursorRect(old),self:cursorRect(cursor))
     if self.stroke and self.stroke.eraser and cursor_rect then
-        -- Include the whole transient outline trail in the one quiet cleanup.
         self.eraser_cleanup_rect=unionRect(self.eraser_cleanup_rect,cursor_rect)
     end
     if not changed_rect and old and cursor and old.x==cursor.x and old.y==cursor.y
-        and old.radius==cursor.radius then return end
+        and old.radius==cursor.radius and old.hover==cursor.hover then return end
     local rect=unionRect(cursor_rect,changed_rect)
     self.eraser_cursor=cursor
     if not rect then return end
@@ -388,9 +395,9 @@ function Ink:startWriting(recalibrate,automatic)
     if not self:saveInk() then return end
     local input_options={}
     for key,value in pairs(self.settings.input or {}) do input_options[key]=value end
-    -- Do not repaint the screen while the eraser is merely in proximity.
-    -- BTN_TOUCH or pressure contact still generates down/move immediately.
-    input_options.emit_hover=false
+    -- Receive proximity motion for the non-destructive, throttled preview.
+    -- The decoder still emits DOWN only for true BTN_TOUCH/pressure contact.
+    input_options.emit_hover=true
     local adapter,input_error = PenInput.open(input_options)
     if not adapter then message(gettext("Cannot open the Scribe pen: ")..tostring(input_error)); return end
     self.adapter = adapter
@@ -518,9 +525,31 @@ end
 
 function Ink:penEvent(event)
     if self.eraser_test then return end
-    -- Proximity is not contact. Never enqueue any display work on hover.
-    if event.phase=="hover" then return end
+    if event.phase=="hover" then
+        -- Preview is NEVER an erase. Avoid UI fallback repaints when the PDF
+        -- framebuffer snapshot is missing/stale: those can flash repeatedly.
+        if self.stroke or self.eraser_cleanup_task then return end
+        local allowed=self.mapping and self:checkView()
+            and UIManager:getTopmostVisibleWidget()==self.overlay
+            and (event.eraser or self.selected_tool=="eraser")
+        local transform=allowed and self:transform()
+        if allowed and self.clean_bb and self.clean_key==self:renderKey(transform)
+            and Screen.bb and not Screen.forced_rotation then
+            local screen=Calibration.apply(self.mapping,event)
+            local previous=self.eraser_cursor
+            if previous and previous.hover
+                and (screen.x-previous.x)^2+(screen.y-previous.y)^2<9 then return end
+            local now=time.now()
+            if self.last_eraser_hover and now-self.last_eraser_hover<time.ms(70) then return end
+            self.last_eraser_hover=now
+            self:updateEraserCursor(screen,nil,transform,true)
+        elseif self.eraser_cursor and self.eraser_cursor.hover then
+            self:updateEraserCursor(nil)
+        end
+        return
+    end
     if event.phase=="leave" then
+        self.last_eraser_hover=nil
         if self.eraser_cursor then self:updateEraserCursor(nil) end
         return
     end
@@ -818,7 +847,7 @@ function Ink:diagnostics()
     local info = adapter.info
     local rx,ry = adapter.ranges.x,adapter.ranges.y
     adapter:close()
-    message("Scribe Ink 0.4.3\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
+    message("Scribe Ink 0.4.4\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
         .."\nX: "..rx.min..".."..rx.max.."\nY: "..ry.min..".."..ry.max
         .."\nRear eraser event supported: "..tostring(info.has_rubber)
         .."\nInput source: "..tostring(info.source_hint or "unknown")

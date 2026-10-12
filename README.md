@@ -1,10 +1,12 @@
-# Scribe Ink 0.4.3
+# Scribe Ink 0.4.4
 
 An installable KOReader plugin for freehand PDF handwriting on a jailbroken Kindle Scribe. A compact, collapsible left-side dock offers Pen, Erase, Undo, PDF export, and the KOReader menu. Tap Pen to choose a line width. Fingers navigate normally; the pen writes automatically, with palm rejection while the pen is nearby.
 
-Designed for the user's Kindle Scribe 2024, firmware **5.19.6**, and **KOReader 2026.07.1**. The user confirmed faster writing, the left dock, and rear-eraser input in earlier releases. **0.4.3 needs confirmation on the device.** It shows the actual white eraser contact area and clears fast-refresh artifacts with one regional flash after lift.
+Designed for the user's Kindle Scribe 2024, firmware **5.19.6**, and **KOReader 2026.07.1**. Earlier releases were confirmed for faster writing, the left dock, and rear-eraser input. **0.4.4 needs confirmation on the device.** It adds a non-destructive hover preview and keeps an active rear-eraser stroke from turning into pen ink during firmware tool-key chatter.
 
-Version **0.4.3** replaces the outlined eraser cursor with a temporary solid white footprint, matching the area being erased. On lift, it restores the page image and performs one prompt, regional `flashui` refresh to clear artifacts from fast refreshes. This release needs on-device confirmation.
+Version **0.4.4** displays a sparse dark eraser preview while the eraser is near the page, then switches to the white contact footprint while touching. Hover never cuts or saves ink and uses throttled fast updates. The input decoder keeps the rear eraser identity through brief `BTN_TOOL_RUBBER`/`BTN_TOOL_PEN` changes and emits release separately from later hover.
+
+Version **0.4.3** replaces the outlined eraser cursor with a temporary solid white footprint, matching the area being erased. On lift, it restores the page image and performs one prompt, regional `flashui` refresh to clear artifacts from fast refreshes.
 
 Version **0.4.2** shows the eraser footprint only during physical contact. It hides the cursor on release and ignores hover for display updates. Contact erasing uses fast local refreshes; after the gesture ends, a single delayed regional UI refresh clears any remaining e-ink ghosts, including along the cursor trail. Brief `BTN_TOOL_RUBBER` signal dropouts remain tolerated. The cursor is transient and is never saved to notes or exported PDFs.
 
@@ -21,7 +23,7 @@ Version **0.1.1** fixes the missing Scribe Ink menu reported by the user. In 0.1
 ## Install
 
 1. Exit KOReader and connect the Kindle to the computer over USB.
-2. Open `scribeink-0.4.3-install.zip`. Copy the **entire `scribeink.koplugin` folder** into your existing `koreader/plugins/` folder on the Kindle, replacing the previous version if installed. A usual location is `/mnt/us/koreader/plugins/`; some launchers place KOReader elsewhere. Find the folder that already contains other `.koplugin` folders.
+2. Open `scribeink-0.4.4-install.zip`. Copy the **entire `scribeink.koplugin` folder** into your existing `koreader/plugins/` folder on the Kindle, replacing the previous version if installed. A usual location is `/mnt/us/koreader/plugins/`; some launchers place KOReader elsewhere. Find the folder that already contains other `.koplugin` folders.
 3. Confirm this structure, without an extra nested folder:
 
    ```text
@@ -45,7 +47,7 @@ Use single-page PDF view, with reflow off and **PDF page rotation set to 0**. Sc
 
 On the first start, tap each of the three displayed crosses once with the pen **tip**, lifting between taps. Calibration handles swapped, reversed, and differently scaled digitizer axes. It is saved for each screen orientation and input device. Use **Recalibrate pen** if handwriting is offset.
 
-- Write with the pen tip automatically. Flip the pen and touch the page with its rear eraser to erase. While touching, a transient solid white circle shows the eraser footprint; the page is restored when you lift. It is not part of saved ink or the exported PDF.
+- Write with the pen tip automatically. Flip the pen and touch the page with its rear eraser to erase. When the eraser is near the page, a sparse dark preview shows its position; while touching, a solid white circle shows the contact footprint. The page is restored when you lift. Neither preview is part of saved ink or the exported PDF.
 - Tap **Erase** to erase using the tip. This is also a usable fallback when the physical rear signal is unavailable. Tap **Pen** to return to writing.
 - Erasing removes the **part of handwriting beneath the eraser**, leaving the rest of each stroke. Fast sweeps are continuous between input samples, and sparse lines are split at interpolated cut points. This applies to existing sidecar notes as well as new ink. Printed PDF content and annotations made in other applications remain intact.
 - **Undo** reverses one pen stroke or one eraser gesture. Undo history is limited to the current open-document session, up to 100 actions.
@@ -83,7 +85,7 @@ Runtime capability checks protect older/mismatched builds. Native ink export req
 
 **Writing works but the rear eraser does not:** 0.2.0 recognizes pressure contact from an identified eraser even when its driver omits `BTN_TOUCH`. It also supports explicit **Rear eraser signal** selection: rubber tool (default), stylus button 1, or stylus button 2. Do not select a button mapping unless the diagnostic capture shows that the rear eraser actually uses it; those buttons can be the pen's side buttons on other devices.
 
-For the supplied Scribe log, leave **Rear rubber tool (default)** selected. The observed signal is already correct. Touch and move the rear eraser across a freshly written line on the same original PDF. The crossed section should disappear without changing pages, leaving ink on both sides. Version 0.4.3 shows a transient white eraser footprint during contact and requests one local cleanup refresh on lift. The log adds `Scribe Ink eraser stroke` entries with decoded/accepted samples, altered-stroke count, rejection reasons, and raw/screen/page coordinates. If it still fails, share the updated log after this ordinary erase attempt.
+For the supplied Scribe log, leave **Rear rubber tool (default)** selected. The observed signal is already correct. Touch and move the rear eraser across a freshly written line on the same original PDF. The crossed section should disappear without changing pages, leaving ink on both sides. Version 0.4.4 shows a sparse hover preview and a white contact footprint. The log adds `Scribe Ink eraser stroke` entries with decoded/accepted samples, altered-stroke count, rejection reasons, and raw/screen/page coordinates. If it still fails, share the updated log after this ordinary erase attempt.
 
 Choose **Scribe Ink → Test rear eraser (10 seconds)**. While its instruction is visible, repeatedly touch and lift the rear eraser on the page for ten seconds. Handwriting capture pauses during the test. The resulting raw key/pressure summary appears on screen and is written to `crash.log`. Share that summary or the updated log to identify the correct signal. The capture records even events that did not become a recognized stroke. You can use **Erase** with the tip meanwhile. Ordinary finger touches never become eraser strokes.
 

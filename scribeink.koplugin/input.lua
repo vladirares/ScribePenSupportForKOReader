@@ -63,10 +63,11 @@ end
 function Decoder:isEraser()
     return self.rubber or (self.eraser_key == CODE.BTN_STYLUS and self.barrel)
         or (self.eraser_key == CODE.BTN_STYLUS2 and self.barrel2)
-        -- Some firmware drops BTN_TOOL_RUBBER one report before pressure.
-        -- Keep the existing rear contact continuous until pressure falls to 0.
-        or (self.active and self.active_eraser and not self.pen
-            and self.pressure > self.pressure_threshold)
+        -- A contact which began as the rear tool stays an eraser until it
+        -- actually lifts. The firmware can transiently report PEN while the
+        -- rear is still pressing. Never convert that into an ink stroke.
+        or (self.active and self.active_eraser
+            and (self.touch or self.pressure > self.pressure_threshold))
 end
 
 function Decoder:isToolPresent()
@@ -129,6 +130,7 @@ function Decoder:report(callback, timestamp)
         return
     end
     local eraser = self:isEraser()
+    local was_active = self.active
     if self.active and (not contact or eraser ~= self.active_eraser) then
         self:emit("up", callback, timestamp)
         self.active = false
@@ -142,8 +144,9 @@ function Decoder:report(callback, timestamp)
         elseif self.dirty then
             self:emit("move", callback, timestamp)
         end
-    elseif self.emit_hover then
-        -- Hover is feedback only; it must never be interpreted as ink contact.
+    elseif self.emit_hover and not was_active then
+        -- Do not emit hover in the same report as UP: release must restore the
+        -- page and schedule its one cleanup refresh before preview can return.
         if self:isToolPresent() and self.x ~= nil and self.y ~= nil and self.dirty then
             self:emit("hover", callback, timestamp)
         elseif self.hover_present and not self:isToolPresent() then
