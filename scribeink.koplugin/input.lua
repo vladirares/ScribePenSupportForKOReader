@@ -54,6 +54,9 @@ function Input.newDecoder(config)
         emit_hover = config.emit_hover == true,
         eraser_key = eraserKey(config),
         pressure_threshold = config.pressure_threshold or 0,
+        -- Hardware adapters enable a short release grace; pure decoder tests
+        -- default to no delay for backward-compatible protocol fixtures.
+        eraser_release_grace = config.eraser_release_grace or 0,
         pressure = 0,
         pen = false, rubber = false, touch = false, barrel = false, barrel2 = false,
         active = false, dirty = false, blocked = false,
@@ -63,11 +66,9 @@ end
 function Decoder:isEraser()
     return self.rubber or (self.eraser_key == CODE.BTN_STYLUS and self.barrel)
         or (self.eraser_key == CODE.BTN_STYLUS2 and self.barrel2)
-        -- A contact which began as the rear tool stays an eraser until it
-        -- actually lifts. The firmware can transiently report PEN while the
-        -- rear is still pressing. Never convert that into an ink stroke.
-        or (self.active and self.active_eraser
-            and (self.touch or self.pressure > self.pressure_threshold))
+        -- A rear contact stays a rear contact through brief pressure/tool-key
+        -- dropouts. Contact releases are debounced in report(), not here.
+        or (self.active and self.active_eraser)
 end
 
 function Decoder:isToolPresent()
@@ -85,35 +86,77 @@ end
 
 function Decoder:emit(phase, callback, timestamp, cancelled, reason)
     local event = {
-        phase = phase, x = self.x, y = self.y, pressure = self.pressure,
+        phase = phase,
+        -- Do not extend a completed erase to a later in-air hover coordinate.
+        x = phase == "up" and self.pending_eraser_up and self.last_contact_x or self.x,
+        y = phase == "up" and self.pending_eraser_up and self.last_contact_y or self.y,
+        pressure = self.pressure,
         eraser = (self.active and self.active_eraser) or (not self.active and self:isEraser()) or false,
         time = timestamp, cancelled = cancelled or nil, reason = reason,
     }
+    if phase == "down" or phase == "move" then
+        self.last_contact_x, self.last_contact_y = self.x, self.y
+    end
     if callback then callback(event) end
 end
 
 function Decoder:cancel(callback, reason)
+    -- An overrun can lose coordinates. Split the geometry, but remember an
+    -- active eraser so it can restart at the resynchronized position.
+    self.resume_eraser_on_sync = reason == "input_overrun" and self.active and self.active_eraser or nil
     if self.active then
         self:emit("up", callback, self.time, true, reason or "cancelled")
     end
     self.active = false
     self.active_eraser = nil
+    self.pending_eraser_up = nil
     self.dirty = false
 end
 
 -- Called after EVIOCGKEY/EVIOCGABS snapshots. A contact already in progress is
 -- ignored until it lifts; this also prevents joining strokes across dropped data.
 function Decoder:sync(snapshot)
+    local resume = self.resume_eraser_on_sync
+    self.resume_eraser_on_sync = nil
     self.active = false
     self.active_eraser = nil
+    self.pending_eraser_up = nil
     self.x, self.y = snapshot.x, snapshot.y
     self.pressure = snapshot.pressure or 0
     self.pen, self.rubber = snapshot.pen or false, snapshot.rubber or false
     self.touch, self.barrel = snapshot.touch or false, snapshot.barrel or false
     self.barrel2 = snapshot.barrel2 or false
-    self.blocked = self:isContact()
+    -- Only a rear eraser already active before SYN_DROPPED may resume.
+    -- Newly opened devices still block any preexisting held contact.
+    local touching = self.touch or self.pressure > self.pressure_threshold
+    if resume and touching and self.x ~= nil and self.y ~= nil then
+        self.active, self.active_eraser = true, true
+        self.resume_eraser_after_sync = true
+    else
+        self.resume_eraser_after_sync = false
+    end
+    self.blocked = self:isContact() and not self.active
     self.hover_present = self:isToolPresent()
     self.dirty = false
+end
+
+function Decoder:resume(callback, timestamp)
+    if self.resume_eraser_after_sync and self.active then
+        self.resume_eraser_after_sync = false
+        self:emit("down", callback, timestamp)
+    end
+end
+
+-- The physical eraser remains logically down through short contact-key gaps.
+-- Poll() finalizes the release even when the hardware sends no more reports.
+function Decoder:flushPending(callback, timestamp)
+    if not (self.pending_eraser_up and self.active and self.active_eraser) then return false end
+    if timestamp - self.pending_eraser_up < self.eraser_release_grace then return false end
+    self:emit("up", callback, timestamp)
+    self.active = false
+    self.active_eraser = nil
+    self.pending_eraser_up = nil
+    return true
 end
 
 function Decoder:report(callback, timestamp)
@@ -131,6 +174,18 @@ function Decoder:report(callback, timestamp)
     end
     local eraser = self:isEraser()
     local was_active = self.active
+    if self.active and self.active_eraser and self.eraser_release_grace > 0 then
+        if contact then
+            self.pending_eraser_up = nil
+        else
+            self.pending_eraser_up = self.pending_eraser_up or timestamp
+            if not self:flushPending(callback, timestamp) then
+                self.hover_present = self:isToolPresent()
+                self.dirty = false
+                return
+            end
+        end
+    end
     if self.active and (not contact or eraser ~= self.active_eraser) then
         self:emit("up", callback, timestamp)
         self.active = false
@@ -446,6 +501,8 @@ function Input.open(config)
         api = api, fd = chosen.fd, ranges = chosen.ranges, info = chosen.info,
         decoder = Input.newDecoder({ has_touch = chosen.info.has_touch, barrel_eraser = config.barrel_eraser,
             emit_hover = config.emit_hover == true,
+            eraser_release_grace = config.eraser_release_grace == nil and 0.10
+                or config.eraser_release_grace,
             eraser_key = config.eraser_key, pressure_threshold = chosen.ranges.pressure
                 and math.max(0, chosen.ranges.pressure.min) or 0 }),
         buffer = api.ffi.new("struct input_event[64]"),
@@ -464,6 +521,24 @@ end
 
 -- Nonblocking, bounded work. Returns emitted sample count, or nil/error and
 -- closes only our descriptor on disconnect/read failure.
+-- Use the clock corresponding to evdev's timestamps. Depending on kernel
+-- configuration, input_event uses either monotonic or realtime timestamps.
+local function inputClockNow(api, anchor)
+    local ok, value = pcall(function()
+        local ts = api.ffi.new("struct timespec[1]")
+        local nearest, distance
+        for _, clock_id in ipairs{1, 0} do -- CLOCK_MONOTONIC, CLOCK_REALTIME
+            if api.C.clock_gettime(clock_id, ts) == 0 then
+                local t = tonumber(ts[0].tv_sec) + tonumber(ts[0].tv_nsec) / 1000000000
+                local d = math.abs(t - anchor)
+                if not distance or d < distance then nearest, distance = t, d end
+            end
+        end
+        if distance and distance < 86400 then return nearest end
+    end)
+    return ok and value or nil
+end
+
 function Adapter:poll(callback)
     if self.fd == nil then return nil, "Pen input is closed." end
     local emitted, interrupted = 0, 0
@@ -477,14 +552,29 @@ function Adapter:poll(callback)
             end
         end
     end
+    local function flushPendingRelease()
+        local decoder = self.decoder
+        if not decoder.pending_eraser_up then return end
+        local now = inputClockNow(self.api, decoder.pending_eraser_up)
+        -- If this KOReader FFI build cannot read the clock, do not leave the
+        -- eraser stuck down. Only the debounce (not erasing) degrades.
+        if not now then now = decoder.pending_eraser_up + decoder.eraser_release_grace end
+        decoder:flushPending(deliver, now)
+    end
     for _ = 1, self.max_batches do
         local count = tonumber(self.api.C.read(self.fd, self.buffer, self.api.ffi.sizeof(self.buffer)))
         if count < 0 then
             local errno = self.api.ffi.errno()
-            if errno == 11 then return emitted end -- EAGAIN / EWOULDBLOCK
+            if errno == 11 then
+                flushPendingRelease()
+                return emitted
+            end -- EAGAIN / EWOULDBLOCK
             if errno == 4 then -- EINTR; bounded by max_batches
                 interrupted = interrupted + 1
-                if interrupted >= 4 then return emitted end
+                if interrupted >= 4 then
+                    flushPendingRelease()
+                    return emitted
+                end
             else
                 self.decoder:cancel(deliver, "input_disconnected")
                 self:close()
@@ -507,10 +597,14 @@ function Adapter:poll(callback)
                 if result == "resync" then
                     local synced, error_message = self:resync()
                     if not synced then self:close(); return nil, error_message end
+                    -- Restart at the current snapshot coordinate; do not erase
+                    -- across the unknown portion lost to SYN_DROPPED.
+                    self.decoder:resume(deliver, timestamp)
                 end
             end
         end
     end
+    flushPendingRelease()
     return emitted
 end
 

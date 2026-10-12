@@ -347,4 +347,53 @@ do
     equal(out[6].phase,"hover","moving in air after release previews the new tool")
     equal(out[6].eraser,false)
 end
+-- A held rear eraser tolerates a temporary loss of pressure, touch and tool
+-- key and never silently converts the remaining gesture into a pen stroke.
+do
+    local decoder, out = Input.newDecoder({eraser_release_grace=0.075}), {}
+    local function cb(e) out[#out+1]=e end
+    local function f(kind,code,value,at) return decoder:feed(kind,code,value,at,cb) end
+    local function report(at) f(C.EV_SYN,C.SYN_REPORT,0,at) end
+    f(C.EV_KEY,C.BTN_TOOL_RUBBER,1,1)
+    f(C.EV_ABS,C.ABS_X,100,1);f(C.EV_ABS,C.ABS_Y,200,1)
+    f(C.EV_ABS,C.ABS_PRESSURE,50,1);report(1)
+    equal(out[1].phase,"down")
+    f(C.EV_ABS,C.ABS_PRESSURE,0,1.01)
+    f(C.EV_KEY,C.BTN_TOOL_RUBBER,0,1.01);report(1.01)
+    equal(#out,1,"single no-contact frame cannot end the gesture")
+    f(C.EV_KEY,C.BTN_TOOL_PEN,1,1.035)
+    f(C.EV_ABS,C.ABS_PRESSURE,50,1.035)
+    f(C.EV_ABS,C.ABS_X,110,1.035);report(1.035)
+    equal(out[2].phase,"move","contact resumes in the same gesture")
+    equal(out[2].eraser,true,"PEN-key chatter cannot produce ink")
+    f(C.EV_ABS,C.ABS_PRESSURE,0,1.10);report(1.10)
+    decoder:flushPending(cb,1.14)
+    equal(#out,2,"release must wait for grace")
+    decoder:flushPending(cb,1.18)
+    equal(out[3].phase,"up","release finishes even without more evdev frames")
+    equal(out[3].eraser,true)
+    equal(out[3].x,110,"late hover cannot extend the erase path")
+end
+-- Dropped input never bridges missing coordinates, but immediately restarts
+-- an already-held eraser after resynchronization without requiring a lift.
+do
+    local decoder, out = Input.newDecoder({eraser_release_grace=0.075}), {}
+    local function cb(e) out[#out+1]=e end
+    local function f(kind,code,value,at) return decoder:feed(kind,code,value,at,cb) end
+    f(C.EV_KEY,C.BTN_TOOL_RUBBER,1,1)
+    f(C.EV_ABS,C.ABS_X,100,1);f(C.EV_ABS,C.ABS_Y,200,1)
+    f(C.EV_ABS,C.ABS_PRESSURE,50,1);f(C.EV_SYN,C.SYN_REPORT,0,1)
+    f(C.EV_SYN,C.SYN_DROPPED,0,1.01)
+    equal(out[2].phase,"up")
+    equal(out[2].cancelled,true)
+    equal(f(C.EV_SYN,C.SYN_REPORT,0,1.02),"resync")
+    decoder:sync({x=900,y=950,rubber=true,pressure=40})
+    decoder:resume(cb,1.02)
+    equal(out[3].phase,"down","held eraser restarts after an overrun")
+    equal(out[3].x,900,"restart uses current position, not lost path")
+    equal(out[3].eraser,true)
+    f(C.EV_ABS,C.ABS_X,905,1.03)
+    f(C.EV_SYN,C.SYN_REPORT,0,1.03)
+    equal(out[4].phase,"move")
+end
 return checks

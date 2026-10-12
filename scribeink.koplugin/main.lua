@@ -847,7 +847,7 @@ function Ink:diagnostics()
     local info = adapter.info
     local rx,ry = adapter.ranges.x,adapter.ranges.y
     adapter:close()
-    message("Scribe Ink 0.4.4\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
+    message("Scribe Ink 0.4.5\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
         .."\nX: "..rx.min..".."..rx.max.."\nY: "..ry.min..".."..ry.max
         .."\nRear eraser event supported: "..tostring(info.has_rubber)
         .."\nInput source: "..tostring(info.source_hint or "unknown")
