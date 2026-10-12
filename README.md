@@ -1,8 +1,10 @@
-# Scribe Ink 0.4.6
+# Scribe Ink 0.4.7
 
 An installable KOReader plugin for freehand PDF handwriting on a jailbroken Kindle Scribe. A compact, collapsible left-side dock offers Pen, Erase, Undo, PDF export, and the KOReader menu. Tap Pen to choose a line width. Fingers navigate normally; the pen writes automatically, with palm rejection while the pen is nearby.
 
-Designed for the user's Kindle Scribe 2024, firmware **5.19.6**, and **KOReader 2026.07.1**. Earlier releases were confirmed for faster writing, the left dock, and rear-eraser input. **0.4.6 needs confirmation on the device.** It keeps eraser movement lightweight and commits vector cuts when you lift the pen.
+Designed for the user's Kindle Scribe 2024, firmware **5.19.6**, and **KOReader 2026.07.1**. Earlier releases were confirmed for faster writing, the left dock, and rear-eraser input. **0.4.7 needs confirmation on the device.** It keeps eraser movement lightweight and fixes cleanup by repainting the PDF through ReaderUI when the pen lifts.
+
+Version **0.4.7** requests the localized high-quality cleanup refresh through ReaderUI, forcing the PDF and surviving ink to be repainted beneath the temporary eraser mask. It discards pending fast refreshes and stale snapshots before that repaint, adds a small margin for edge artifacts, and derives a fallback redraw region when direct framebuffer painting is unavailable.
 
 Version **0.4.6** paints a fast white trail during rear-eraser contact, then splits intersected strokes and restores the page once when the gesture ends. This avoids repeatedly fragmenting strokes and repainting the PDF for every input sample. Erasing remains local to crossed ink; one Undo reverses the completed gesture.
 
@@ -27,7 +29,7 @@ Version **0.1.1** fixes the missing Scribe Ink menu reported by the user. In 0.1
 ## Install
 
 1. Exit KOReader and connect the Kindle to the computer over USB.
-2. Open `scribeink-0.4.6-install.zip`. Copy the **entire `scribeink.koplugin` folder** into your existing `koreader/plugins/` folder on the Kindle, replacing the previous version if installed. A usual location is `/mnt/us/koreader/plugins/`; some launchers place KOReader elsewhere. Find the folder that already contains other `.koplugin` folders.
+2. Open `scribeink-0.4.7-install.zip`. Copy the **entire `scribeink.koplugin` folder** into your existing `koreader/plugins/` folder on the Kindle, replacing the previous version if installed. A usual location is `/mnt/us/koreader/plugins/`; some launchers place KOReader elsewhere. Find the folder that already contains other `.koplugin` folders.
 3. Confirm this structure, without an extra nested folder:
 
    ```text
@@ -89,7 +91,7 @@ Runtime capability checks protect older/mismatched builds. Native ink export req
 
 **Writing works but the rear eraser does not:** 0.2.0 recognizes pressure contact from an identified eraser even when its driver omits `BTN_TOUCH`. It also supports explicit **Rear eraser signal** selection: rubber tool (default), stylus button 1, or stylus button 2. Do not select a button mapping unless the diagnostic capture shows that the rear eraser actually uses it; those buttons can be the pen's side buttons on other devices.
 
-For the supplied Scribe log, leave **Rear rubber tool (default)** selected. The observed signal is already correct. Touch and move the rear eraser across a freshly written line on the same original PDF. The crossed section should disappear on lift, leaving ink on both sides. Version 0.4.6 paints the mask during movement and commits the partial stroke cuts on release. The log adds `Scribe Ink eraser stroke` entries with decoded/accepted samples, altered-stroke count, rejection reasons, and raw/screen/page coordinates. If it still fails, share the updated log after this ordinary erase attempt.
+For the supplied Scribe log, leave **Rear rubber tool (default)** selected. The observed signal is already correct. Touch and move the rear eraser across a freshly written line on the same original PDF. The crossed section should disappear on lift, leaving ink on both sides. Versions 0.4.6 and 0.4.7 paint the mask during movement and commit the partial stroke cuts on release; 0.4.7 then redraws the affected PDF region through ReaderUI to clear the mask and refresh artifacts. The log adds `Scribe Ink eraser stroke` entries with decoded/accepted samples, altered-stroke count, rejection reasons, and raw/screen/page coordinates. If it still fails, share the updated log after this ordinary erase attempt.
 
 Choose **Scribe Ink → Test rear eraser (10 seconds)**. While its instruction is visible, repeatedly touch and lift the rear eraser on the page for ten seconds. Handwriting capture pauses during the test. The resulting raw key/pressure summary appears on screen and is written to `crash.log`. Share that summary or the updated log to identify the correct signal. The capture records even events that did not become a recognized stroke. You can use **Erase** with the tip meanwhile. Ordinary finger touches never become eraser strokes.
 

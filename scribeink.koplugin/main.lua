@@ -460,21 +460,28 @@ function Ink:queueSave()
     UIManager:scheduleIn(0.75,self.save_task)
 end
 
--- One high-fidelity *regional* refresh on lift, after the white footprint has
--- been removed from Screen.bb. A flashing UI waveform clears A2/fast ghosts
--- without accumulating page-wide flashes while dragging or hovering.
+-- Re-render real PDF pixels on lift, then do ONE high-quality region refresh.
+-- setDirty(nil, ...) only refreshes the existing framebuffer, which still
+-- contains the white fast-drawn eraser mask. Explicitly dirty ReaderUI so its
+-- page and paintInk() run again before the e-ink update.
 function Ink:scheduleEraserCleanup()
-    if not self.eraser_cleanup_rect then return end
-    if self.eraser_cleanup_task then UIManager:unschedule(self.eraser_cleanup_task) end
-    self.eraser_cleanup_task=function()
-        self.eraser_cleanup_task=nil
-        if self.stroke or not self.writing or not self.overlay then return end
-        local rect=self.eraser_cleanup_rect
-        self.eraser_cleanup_rect=nil
-        if rect then UIManager:setDirty(nil,"flashui",Geom:new(rect)) end
+    local rect=self.eraser_cleanup_rect
+    if not rect then return end
+    -- Abandon any pending fast refresh from this gesture; otherwise a late fast
+    -- waveform may race the clean, high-quality release refresh.
+    self:invalidateCache()
+    if not self.ui then return end
+    -- A tiny margin includes edge pixels/ghosts left by rounded stroke caps.
+    local padding=4
+    local x=math.max(0,math.floor(rect.x-padding))
+    local y=math.max(0,math.floor(rect.y-padding))
+    local right=math.min(Screen:getWidth(),math.ceil(rect.x+rect.w+padding))
+    local bottom=math.min(Screen:getHeight(),math.ceil(rect.y+rect.h+padding))
+    if right>x and bottom>y then
+        UIManager:setDirty(self.ui,"flashui",Geom:new{x=x,y=y,w=right-x,h=bottom-y})
+        -- ReaderUI repaints all widgets above it, including the dock. The
+        -- fresh page paint also reconstructs a valid clean_bb for future hover.
     end
-    -- Let pollPen flush its final fast update before the release refresh.
-    UIManager:scheduleIn(0.03,self.eraser_cleanup_task)
 end
 function Ink:finishStroke()
     local stroke = self.stroke
@@ -490,19 +497,19 @@ function Ink:finishStroke()
         end
         self.store:endUndo()
         local rect=stroke.erase_rect
+        -- Direct painting may be unavailable (no Screen.bb / forced rotation),
+        -- but we must still repaint the PDF after committing the vector cuts.
+        if not rect and stroke.erase_path then
+            local r=self:eraserRadius()
+            for _,point in ipairs(stroke.erase_path) do
+                local screen=Geometry.pageToScreen(point,stroke.transform)
+                rect=unionRect(rect,{x=screen.x-r,y=screen.y-r,w=2*r,h=2*r})
+            end
+        end
         if rect then
             self.eraser_cleanup_rect=unionRect(self.eraser_cleanup_rect,rect)
-            local bb=Screen.bb
-            if bb and not Screen.forced_rotation and self.clean_bb
-                and self.clean_key==self:renderKey(stroke.transform) and bb.blitFrom then
-                bb:blitFrom(self.clean_bb,rect.x,rect.y,rect.x,rect.y,rect.w,rect.h)
-                self:paintStrokes(bb,stroke.transform,rect,0,0)
-                self:protectToolbar(rect)
-                self:refreshRegion(rect,true)
-            else
-                -- Never leave the temporary white mask stuck on the PDF.
-                UIManager:setDirty(self.ui,"ui",Geom:new(rect))
-            end
+            -- Never restore from clean_bb here. It may be stale or may already
+            -- contain the white mask; ReaderUI is the authoritative PDF painter.
             self:scheduleEraserCleanup()
         end
     elseif #stroke.points > 0 then
@@ -881,7 +888,7 @@ function Ink:diagnostics()
     local info = adapter.info
     local rx,ry = adapter.ranges.x,adapter.ranges.y
     adapter:close()
-    message("Scribe Ink 0.4.6\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
+    message("Scribe Ink 0.4.7\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
         .."\nX: "..rx.min..".."..rx.max.."\nY: "..ry.min..".."..ry.max
         .."\nRear eraser event supported: "..tostring(info.has_rubber)
         .."\nInput source: "..tostring(info.source_hint or "unknown")

@@ -875,35 +875,34 @@ check(Manager:displayPixel(100,210)==255 and Manager:displayPixel(140,210)==0
     "erasing is visible immediately on the physical display and preserves the uncontacted tail")
 plugin:penEvent{phase="move",x=105,y=210,eraser=false}
 plugin:penEvent{phase="up",x=105,y=210,eraser=false}
-check(#native_blits>blits_during_contact and not plugin.eraser_cursor,
-    "release restores PDF and ink with one regional blit")
+local release_request=refreshes[#refreshes]
+check(#native_blits==blits_during_contact and release_request.w==ui
+    and release_request.mode=="flashui" and not plugin.eraser_cursor,
+    "release requests one authoritative ReaderUI PDF repaint and regional flash")
+check(release_request.rect.x<=105 and release_request.rect.x+release_request.rect.w>=105
+    and release_request.rect.w<80 and release_request.rect.h<100,
+    "ghosting cleanup is localized with a small padding around the white mask")
+check(not plugin.refresh_rect and not plugin.eraser_cleanup_task,
+    "release discards pending fast refreshes instead of racing the PDF redraw")
+Manager:processRepaints()
 check(Screen.bb:pixel(100,210)==255 and Screen.bb:pixel(140,210)==0,
     "touching one endpoint clears only the nearby ink and preserves its distant tail")
 check(Screen.bb:pixel(110,210)==77 and Screen.bb:pixel(500,500)==99,
-    "regional erasing restores original PDF pixels without disturbing distant content")
+    "reader redraw restores nonwhite PDF content beneath the temporary white mask")
 check(Screen.bb:pixel(120,210)==0,
-    "surviving intersecting ink is replayed after restoring the erased stroke's background")
-check(framebuffer_copies==copies_before_erase,
-    "direct regional erasing retains the clean PDF snapshot without a reader repaint")
+    "surviving intersecting ink is repainted on the real PDF page")
+check(framebuffer_copies>copies_before_erase,
+    "repaint replaces the old clean snapshot with fresh PDF pixels")
 check(erase_refresh.rect.x<=105 and erase_refresh.rect.x+erase_refresh.rect.w>=105
     and erase_refresh.rect.w<60 and erase_refresh.rect.h<100,
     "erase refresh covers only the cut and cursor while preserving partial survivors")
-local release_cleanup=plugin.eraser_cleanup_task
-check(release_cleanup and tasks[release_cleanup]==0.03,
-    "lifting the eraser schedules one prompt release refresh, not a hover refresh")
-plugin:pollPen() -- present the final fast framebuffer update first
-local refresh_count_before_cleanup=#refreshes
-tasks[release_cleanup]=nil; release_cleanup()
 local release_refresh=refreshes[#refreshes]
-check(#refreshes==refresh_count_before_cleanup+1 and release_refresh.w==nil
-    and release_refresh.mode=="flashui" and release_refresh.rect.x<=105
-    and release_refresh.rect.x+release_refresh.rect.w>=105
-    and release_refresh.rect.w<80 and release_refresh.rect.h<100,
-    "release flashes only the erased footprint with a ghost-clearing waveform")
-Manager:processRepaints()
+check(release_refresh.w==ui and release_refresh.mode=="flashui"
+    and not plugin.eraser_cleanup_task and plugin.eraser_cleanup_rect==nil,
+    "release requests a single high-quality refresh attached to an actual reader repaint")
 check(Manager:displayPixel(110,210)==77 and Manager:displayPixel(140,210)==0
-    and not plugin.eraser_cursor and plugin.eraser_cleanup_rect==nil,
-    "release leaves the PDF and surviving ink visible, with no eraser outline")
+    and not plugin.eraser_cursor,
+    "after release the PDF pixels and surviving ink are visibly restored")
 local after_release=#refreshes
 plugin.last_eraser_hover=nil
 plugin:penEvent{phase="hover",x=105,y=210,eraser=false}
@@ -1044,10 +1043,17 @@ for _,cache_state in ipairs{"stale","missing"} do
     check(matches,cache_state.." cache partial display refresh matches authoritative repaint at "
         ..tostring(mx)..","..tostring(my))
     plugin:penEvent{phase="up",x=265,y=385,eraser=true}
+    local release=refreshes[#refreshes]
+    check(release.w==ui and release.mode=="flashui"
+        and not plugin.refresh_rect and not plugin.eraser_cleanup_task,
+        cache_state.." cache forces a real PDF paint before a localized high-quality refresh")
     plugin:pollPen(); Manager:processRepaints()
     check(#store:page(1)==3 and not plugin.eraser_cursor
         and #native_circles==circles_before,
         cache_state.." cache commits geometry and removes the mask on release")
+    check(Manager:displayPixel(265,385)==255
+        and Manager:displayPixel(100,350)==0 and Manager:displayPixel(325,550)==0,
+        cache_state.." cache restores the reader and surviving ink on lift")
     local before_hover=#refreshes
     plugin:penEvent{phase="hover",x=265,y=385,eraser=true}
     plugin:pollPen(); Manager:processRepaints()
