@@ -4,7 +4,7 @@ import hashlib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.4.2'
+VERSION = '0.4.3'
 DIST = ROOT / 'dist'
 PLUGIN = 'scribeink.koplugin'
 DIST.mkdir(exist_ok=True)
@@ -12,7 +12,7 @@ DIST.mkdir(exist_ok=True)
 def write_archive(path, entries):
     with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for source, target in sorted(entries, key=lambda item: item[1]):
-            info = zipfile.ZipInfo(target, date_time=(2026, 10, 12, 0, 0, 0))
+            info = zipfile.ZipInfo(target, date_time=(2026, 10, 13, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             archive.writestr(info, source.read_bytes())

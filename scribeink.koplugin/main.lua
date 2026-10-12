@@ -280,7 +280,7 @@ function Ink:clip()
     return {x=left,y=top,w=math.max(0,right-left),h=math.max(0,bottom-top)}
 end
 
--- Use exactly the same physical screen radius for the outline and erasing.
+-- Keep the temporary white footprint exactly the size of the erased area.
 function Ink:eraserRadius()
     return Screen:scaleBySize(10)+1
 end
@@ -301,28 +301,14 @@ function Ink:cursorRect(cursor)
     if right<=x or bottom<=y then return nil end
     return {x=x,y=y,w=right-x,h=bottom-y}
 end
--- Draw outlines only. paintCircle is a FILLED disc in KOReader and would
--- cover underlying ink, misleading the user about what will be deleted.
-local function drawCircleOutline(bb,cx,cy,r,color)
-    local inner=(r-1)*(r-1)
-    for dy=-r,r do
-        local dx=math.floor(math.sqrt(math.max(0,r*r-dy*dy)))
-        local ix=-1
-        if math.abs(dy)<r then
-            ix=math.floor(math.sqrt(math.max(0,inner-dy*dy)))
-        end
-        local width=math.max(1,dx-ix)
-        bb:paintRect(cx-dx,cy+dy,width,1,color)
-        bb:paintRect(cx+ix+1,cy+dy,width,1,color)
-    end
-end
 function Ink:paintEraserCursor(bb,x,y)
     local cursor=self.eraser_cursor
     if not cursor then return end
     local cx,cy=math.floor(cursor.x+(x or 0)+0.5),math.floor(cursor.y+(y or 0)+0.5)
-    -- White halo and dark ring; keep the center of the rubber transparent.
-    drawCircleOutline(bb,cx,cy,cursor.radius+1,Blitbuffer.COLOR_WHITE)
-    drawCircleOutline(bb,cx,cy,cursor.radius,Blitbuffer.COLOR_BLACK)
+    -- Opaque white, not a dark outline: the temporary mask shows the exact
+    -- circular contact footprint. The underlying PDF is restored on movement
+    -- or release from clean_bb, so this never changes the PDF itself.
+    bb:paintCircle(cx,cy,cursor.radius,Blitbuffer.COLOR_WHITE)
 end
 -- Recompose from the clean PDF snapshot, not from a screenshot containing old
 -- ink. Both the cut and the cursor move are painted into Screen.bb immediately.
@@ -467,11 +453,10 @@ function Ink:queueSave()
     UIManager:scheduleIn(0.75,self.save_task)
 end
 
--- A quiet-time UI refresh clears fast-waveform ghosts after eraser contact.
--- The physical footprint is already shown using the fast waveform; this runs
--- once after contact settles, never during hover or active pen movement.
+-- One high-fidelity *regional* refresh on lift, after the white footprint has
+-- been removed from Screen.bb. A flashing UI waveform clears A2/fast ghosts
+-- without accumulating page-wide flashes while dragging or hovering.
 function Ink:scheduleEraserCleanup()
-    self.eraser_cleanup_rect=unionRect(self.eraser_cleanup_rect,self:cursorRect(self.eraser_cursor))
     if not self.eraser_cleanup_rect then return end
     if self.eraser_cleanup_task then UIManager:unschedule(self.eraser_cleanup_task) end
     self.eraser_cleanup_task=function()
@@ -479,16 +464,24 @@ function Ink:scheduleEraserCleanup()
         if self.stroke or not self.writing or not self.overlay then return end
         local rect=self.eraser_cleanup_rect
         self.eraser_cleanup_rect=nil
-        if rect then UIManager:setDirty(nil,"ui",Geom:new(rect)) end
+        if rect then UIManager:setDirty(nil,"flashui",Geom:new(rect)) end
     end
-    UIManager:scheduleIn(0.18,self.eraser_cleanup_task)
+    -- Let pollPen flush its final fast update before the release refresh.
+    UIManager:scheduleIn(0.03,self.eraser_cleanup_task)
 end
 function Ink:finishStroke()
     local stroke = self.stroke
     if not stroke then return end
+    if stroke.eraser and self.eraser_cursor then
+        -- Recompose the last footprint before requesting the release flash.
+        -- Doing this while the eraser stroke is still active also records the
+        -- final dirty footprint in eraser_cleanup_rect.
+        self:updateEraserCursor(nil)
+    end
     self.stroke = nil
     if stroke.eraser then
         self.store:endUndo()
+        self:scheduleEraserCleanup()
     elseif #stroke.points > 0 then
         local added,err = self.store:add(stroke.page,{width=stroke.width,points=stroke.points})
         if not added then
@@ -497,7 +490,6 @@ function Ink:finishStroke()
             return
         end
     end
-    self:scheduleEraserCleanup()
     self:queueSave()
     if self.overlay then self.overlay:updateUndoState() end
 end
@@ -826,7 +818,7 @@ function Ink:diagnostics()
     local info = adapter.info
     local rx,ry = adapter.ranges.x,adapter.ranges.y
     adapter:close()
-    message("Scribe Ink 0.4.2\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
+    message("Scribe Ink 0.4.3\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
         .."\nX: "..rx.min..".."..rx.max.."\nY: "..ry.min..".."..ry.max
         .."\nRear eraser event supported: "..tostring(info.has_rubber)
         .."\nInput source: "..tostring(info.source_hint or "unknown")
