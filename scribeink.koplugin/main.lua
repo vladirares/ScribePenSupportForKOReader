@@ -344,9 +344,22 @@ function Ink:updateEraserCursor(screen,changed_bounds,transform)
         local b={x=a.x+changed_bounds.w*transform.zoom,y=a.y+changed_bounds.h*transform.zoom}
         changed_rect=Render.bounds(a,b,4,self:clip())
     end
-    local rect=unionRect(unionRect(self:cursorRect(old),self:cursorRect(cursor)),changed_rect)
+    -- No repaint for repeated contact samples at an unchanged location.
+    -- In particular, hovering must never drive screen refreshes.
+    local cursor_rect=unionRect(self:cursorRect(old),self:cursorRect(cursor))
+    if self.stroke and self.stroke.eraser and cursor_rect then
+        -- Include the whole transient outline trail in the one quiet cleanup.
+        self.eraser_cleanup_rect=unionRect(self.eraser_cleanup_rect,cursor_rect)
+    end
+    if not changed_rect and old and cursor and old.x==cursor.x and old.y==cursor.y
+        and old.radius==cursor.radius then return end
+    local rect=unionRect(cursor_rect,changed_rect)
     self.eraser_cursor=cursor
     if not rect then return end
+    if changed_rect then
+        -- One high-quality cleanup per gesture, not one per position sample.
+        self.eraser_cleanup_rect=unionRect(self.eraser_cleanup_rect,changed_rect)
+    end
     transform=transform or self:transform()
     local bb=Screen.bb
     if bb and not Screen.forced_rotation and self.clean_bb
@@ -355,10 +368,12 @@ function Ink:updateEraserCursor(screen,changed_bounds,transform)
         self:paintStrokes(bb,transform,rect,0,0)
         self:paintEraserCursor(bb,0,0)
         self:protectToolbar(rect)
-        self:refreshRegion(rect,true)
+        -- Directly updated Screen.bb: low-latency monochrome refresh.
+        self:refreshRegion(rect,changed_rect~=nil)
     else
-        -- No valid PDF snapshot yet: let KOReader do a safe authoritative paint.
-        UIManager:setDirty(self.ui,"[partial]",Geom:new(rect))
+        -- No valid PDF snapshot: repaint via KOReader, but avoid the
+        -- page waveform that can visibly flash on each short erase.
+        UIManager:setDirty(self.ui,"ui",Geom:new(rect))
     end
 end
 
@@ -387,7 +402,9 @@ function Ink:startWriting(recalibrate,automatic)
     if not self:saveInk() then return end
     local input_options={}
     for key,value in pairs(self.settings.input or {}) do input_options[key]=value end
-    input_options.emit_hover=true -- only writing needs cursor events; tests/diagnostics retain contact-only behavior
+    -- Do not repaint the screen while the eraser is merely in proximity.
+    -- BTN_TOUCH or pressure contact still generates down/move immediately.
+    input_options.emit_hover=false
     local adapter,input_error = PenInput.open(input_options)
     if not adapter then message(gettext("Cannot open the Scribe pen: ")..tostring(input_error)); return end
     self.adapter = adapter
@@ -450,6 +467,22 @@ function Ink:queueSave()
     UIManager:scheduleIn(0.75,self.save_task)
 end
 
+-- A quiet-time UI refresh clears fast-waveform ghosts after eraser contact.
+-- The physical footprint is already shown using the fast waveform; this runs
+-- once after contact settles, never during hover or active pen movement.
+function Ink:scheduleEraserCleanup()
+    self.eraser_cleanup_rect=unionRect(self.eraser_cleanup_rect,self:cursorRect(self.eraser_cursor))
+    if not self.eraser_cleanup_rect then return end
+    if self.eraser_cleanup_task then UIManager:unschedule(self.eraser_cleanup_task) end
+    self.eraser_cleanup_task=function()
+        self.eraser_cleanup_task=nil
+        if self.stroke or not self.writing or not self.overlay then return end
+        local rect=self.eraser_cleanup_rect
+        self.eraser_cleanup_rect=nil
+        if rect then UIManager:setDirty(nil,"ui",Geom:new(rect)) end
+    end
+    UIManager:scheduleIn(0.18,self.eraser_cleanup_task)
+end
 function Ink:finishStroke()
     local stroke = self.stroke
     if not stroke then return end
@@ -464,6 +497,7 @@ function Ink:finishStroke()
             return
         end
     end
+    self:scheduleEraserCleanup()
     self:queueSave()
     if self.overlay then self.overlay:updateUndoState() end
 end
@@ -492,12 +526,10 @@ end
 
 function Ink:penEvent(event)
     if self.eraser_test then return end
-    if event.phase=="leave" then self:updateEraserCursor(nil); return end
-    if event.phase=="hover" then
-        if self.mapping and self:checkView() and UIManager:getTopmostVisibleWidget()==self.overlay
-            and (event.eraser or self.selected_tool=="eraser") then
-            self:updateEraserCursor(Calibration.apply(self.mapping,event))
-        else self:updateEraserCursor(nil) end
+    -- Proximity is not contact. Never enqueue any display work on hover.
+    if event.phase=="hover" then return end
+    if event.phase=="leave" then
+        if self.eraser_cursor then self:updateEraserCursor(nil) end
         return
     end
     if event.phase=="down" and not (event.eraser or self.selected_tool=="eraser") then
@@ -562,6 +594,9 @@ function Ink:penEvent(event)
             self:penEvent{phase="move",x=event.x,y=event.y,pressure=event.pressure,eraser=event.eraser}
         end
         self:finishStroke()
+        -- The footprint is visible only during real contact; erase any cursor
+        -- pixels after release, even if the tool stays in hover range.
+        if self.eraser_cursor then self:updateEraserCursor(nil) end
         self.suppressed = false
         self:logEraserContact(event)
         return
@@ -597,6 +632,11 @@ function Ink:penEvent(event)
     local point = Geometry.screenToPage(screen,transform)
     if event.phase == "down" then
         self:finishStroke()
+        -- Never run a slow cleanup in the middle of an active eraser gesture.
+        if self.eraser_cleanup_task then
+            UIManager:unschedule(self.eraser_cleanup_task)
+            self.eraser_cleanup_task=nil
+        end
         if self.save_task then UIManager:unschedule(self.save_task); self.save_task=nil end
         self.stroke = {page=transform.page,width=self.settings.width,points={},
             eraser=event.eraser or self.selected_tool=="eraser",transform=transform}
@@ -662,6 +702,8 @@ end
 
 function Ink:invalidateCache()
     if self.clean_bb then self.clean_bb:free(); self.clean_bb=nil end
+    if self.eraser_cleanup_task then UIManager:unschedule(self.eraser_cleanup_task) end
+    self.eraser_cleanup_task=nil; self.eraser_cleanup_rect=nil
     self.clean_key=nil; self.refresh_rect=nil; self.refresh_erase=nil
 end
 
@@ -677,17 +719,13 @@ function Ink:refreshRegion(rect,erasing)
 end
 
 function Ink:flushInkRefresh()
-    local rect,erasing=self.refresh_rect,self.refresh_erase
+    local rect=self.refresh_rect
     self.refresh_rect,self.refresh_erase=nil,nil
     if not rect or not self.overlay then return end
-    if erasing then
-        -- The clean PDF background + surviving ink + cursor are already in bb.
-        -- Request ONLY an e-ink refresh (not an expensive ReaderUI repaint).
-        -- The page-content waveform clears the prior black strokes reliably.
-        UIManager:setDirty(nil,"[partial]",Geom:new(rect))
-    else
-        UIManager:setDirty(nil,"fast",Geom:new(rect))
-    end
+    -- The clean PDF + surviving ink have already been recomposed in Screen.bb.
+    -- Always use the fast waveform while touching. '[partial]' can trigger
+    -- slow, visible flashes and queues up when fed high-frequency pen samples.
+    UIManager:setDirty(nil,"fast",Geom:new(rect))
 end
 
 function Ink:drawNewSegment(a,b,width,transform)
@@ -788,7 +826,7 @@ function Ink:diagnostics()
     local info = adapter.info
     local rx,ry = adapter.ranges.x,adapter.ranges.y
     adapter:close()
-    message("Scribe Ink 0.4.1\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
+    message("Scribe Ink 0.4.2\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
         .."\nX: "..rx.min..".."..rx.max.."\nY: "..ry.min..".."..ry.max
         .."\nRear eraser event supported: "..tostring(info.has_rubber)
         .."\nInput source: "..tostring(info.source_hint or "unknown")

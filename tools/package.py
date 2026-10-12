@@ -4,7 +4,7 @@ import hashlib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.4.1'
+VERSION = '0.4.2'
 DIST = ROOT / 'dist'
 PLUGIN = 'scribeink.koplugin'
 DIST.mkdir(exist_ok=True)

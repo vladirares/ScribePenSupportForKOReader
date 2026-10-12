@@ -832,12 +832,20 @@ local copies_before_erase=framebuffer_copies
 local blits_before_erase=#native_blits
 local circles_before_erase=#native_circles
 tapButton(persistent_overlay,"Erase")
+-- Moving the eraser in the air must not refresh the display or mutate ink.
+plugin:flushInkRefresh()
+local no_contact_refreshes=#refreshes
+local no_contact_count=#store:page(1)
+plugin:penEvent{phase="hover",x=105,y=210,eraser=false}
+plugin:flushInkRefresh()
+check(#refreshes==no_contact_refreshes and #store:page(1)==no_contact_count
+    and not plugin.eraser_cursor, "hover is silent and never erases")
 check(Manager:displayPixel(100,210)==0, "erasure begins from actually presented handwriting")
 plugin:penEvent{phase="down",x=105,y=210,eraser=false}
 plugin:pollPen()
 local erase_refresh=refreshes[#refreshes]
-check(erase_refresh.w==nil and erase_refresh.mode=="[partial]" and plugin.stroke and plugin.stroke.eraser,
-    "active eraser contact requests a direct partial refresh before lift or page navigation (reader="
+check(erase_refresh.w==nil and erase_refresh.mode=="fast" and plugin.stroke and plugin.stroke.eraser,
+    "active eraser contact requests a direct fast refresh before lift or page navigation (reader="
         ..tostring(erase_refresh.w==ui)..", mode="..tostring(erase_refresh.mode)..", stroke="
         ..tostring(plugin.stroke and plugin.stroke.eraser)..")")
 check(framebuffer_copies==copies_before_erase and #native_blits>blits_before_erase,
@@ -848,9 +856,8 @@ check(Manager:displayPixel(100,210)==255 and Manager:displayPixel(140,210)==0
     "erasing is visible immediately on the physical display and preserves the uncontacted tail")
 plugin:penEvent{phase="move",x=105,y=210,eraser=false}
 plugin:penEvent{phase="up",x=105,y=210,eraser=false}
-check(#native_circles==circles_before_erase and plugin.eraser_cursor
-    and plugin.eraser_cursor.radius==plugin:eraserRadius(),
-    "manual erasing shows a transient cursor matching the physical eraser footprint")
+check(#native_circles==circles_before_erase and not plugin.eraser_cursor,
+    "eraser footprint disappears on release rather than continuing to flash in hover")
 check(Screen.bb:pixel(100,210)==255 and Screen.bb:pixel(140,210)==0,
     "touching one endpoint clears only the nearby ink and preserves its distant tail")
 check(Screen.bb:pixel(110,210)==77 and Screen.bb:pixel(500,500)==99,
@@ -978,7 +985,7 @@ for _,cache_state in ipairs{"stale","missing"} do
     local requests_before=#refreshes
     plugin:pollPen()
     local request=refreshes[#refreshes]
-    check(#refreshes==requests_before+1 and request.w==ui and request.mode=="[partial]"
+    check(#refreshes==requests_before+1 and request.w==ui and request.mode=="ui"
         and request.rect.x<=265 and request.rect.x+request.rect.w>=265
         and request.rect.y<=385 and request.rect.y+request.rect.h>=385
         and request.rect.w<60 and request.rect.h<60,
@@ -993,12 +1000,13 @@ for _,cache_state in ipairs{"stale","missing"} do
         ..tostring(mx)..","..tostring(my))
     plugin:penEvent{phase="up",x=265,y=385,eraser=true}
     plugin:pollPen(); Manager:processRepaints()
-    check(plugin.eraser_cursor and #native_circles==circles_before,
-        cache_state.." cache physical rear erasure keeps the transient outline visible")
-    plugin:penEvent{phase="leave"}
+    check(not plugin.eraser_cursor and #native_circles==circles_before,
+        cache_state.." cache eraser outline is hidden on release")
+    local before_hover=#refreshes
+    plugin:penEvent{phase="hover",x=265,y=385,eraser=true}
     plugin:pollPen(); Manager:processRepaints()
-    check(not plugin.eraser_cursor,
-        cache_state.." cache clears the cursor when the eraser leaves proximity")
+    check(not plugin.eraser_cursor and #refreshes==before_hover,
+        cache_state.." cache idle hover does not request a refresh")
 end
 check(avoid_flash_requests==0,
     "content erasure keeps its native partial waveform without the UI flash-avoidance downgrade")
