@@ -1,0 +1,8 @@
+.research/
+**/__pycache__/
+*.py[cod]
+dist/*-install/
+dist/scribeink-*-install.zip
+dist/scribeink-*-source.zip
+!dist/scribeink-0.4.0-install.zip
+!dist/scribeink-0.4.0-source.zip
