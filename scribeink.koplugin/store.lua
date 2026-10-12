@@ -235,10 +235,12 @@ function Store:erase(page, a, b, radius)
     -- Replace in reverse order. Undo reverses the replacements again, restoring
     -- exact original paths and paint ordering across an entire eraser gesture.
     for i = #strokes, 1, -1 do
-        local fragments = Geometry.eraseStroke(strokes[i], a, b, radius)
+        local fragments, cut_bounds = Geometry.eraseStroke(strokes[i], a, b, radius)
         if fragments then
             local removed = table.remove(strokes, i)
-            local bounds = Geometry.bounds(removed)
+            -- Only the erased segment needs immediate recomposition. Previously
+            -- we repainted the entire original path, even for a tiny cut.
+            local bounds = cut_bounds or Geometry.bounds(removed)
             for fragment = #fragments, 1, -1 do
                 table.insert(strokes, i, fragments[fragment])
             end
@@ -256,9 +258,8 @@ function Store:erase(page, a, b, radius)
         end
     end
     if local_group then self:endUndo() end
-    -- Rasterizing interpolated endpoints rounds them to screen pixels and can
-    -- subtly change a long surviving segment's slope. Refresh its full original
-    -- bounds so the immediate display and later page repaints remain identical.
+    -- Allow the caller to refresh only the edited portion of long paths;
+    -- it adds raster padding and recomposes surviving ink from the sidecar.
     return changed, affected
 end
 

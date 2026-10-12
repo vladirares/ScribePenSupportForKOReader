@@ -836,31 +836,32 @@ check(Manager:displayPixel(100,210)==0, "erasure begins from actually presented 
 plugin:penEvent{phase="down",x=105,y=210,eraser=false}
 plugin:pollPen()
 local erase_refresh=refreshes[#refreshes]
-check(erase_refresh.w==ui and erase_refresh.mode=="[partial]" and plugin.stroke and plugin.stroke.eraser,
-    "active eraser contact requests a content refresh before lift or page navigation (reader="
+check(erase_refresh.w==nil and erase_refresh.mode=="[partial]" and plugin.stroke and plugin.stroke.eraser,
+    "active eraser contact requests a direct partial refresh before lift or page navigation (reader="
         ..tostring(erase_refresh.w==ui)..", mode="..tostring(erase_refresh.mode)..", stroke="
         ..tostring(plugin.stroke and plugin.stroke.eraser)..")")
-check(framebuffer_copies==copies_before_erase and #native_blits==blits_before_erase,
-    "eraser batches restoration into the core paint pass instead of recopying or replaying each sample")
+check(framebuffer_copies==copies_before_erase and #native_blits>blits_before_erase,
+    "eraser recomposes the affected screen region from the clean snapshot without repainting the PDF")
 Manager:processRepaints()
 check(Manager:displayPixel(100,210)==255 and Manager:displayPixel(140,210)==0
     and Manager:displayPixel(110,210)==77 and view.state.page==1,
     "erasing is visible immediately on the physical display and preserves the uncontacted tail")
 plugin:penEvent{phase="move",x=105,y=210,eraser=false}
 plugin:penEvent{phase="up",x=105,y=210,eraser=false}
-check(#native_circles==circles_before_erase and not plugin.eraser_cursor,
-    "manual erasing draws no visible circular cursor or transient outline")
+check(#native_circles==circles_before_erase and plugin.eraser_cursor
+    and plugin.eraser_cursor.radius==plugin:eraserRadius(),
+    "manual erasing shows a transient cursor matching the physical eraser footprint")
 check(Screen.bb:pixel(100,210)==255 and Screen.bb:pixel(140,210)==0,
     "touching one endpoint clears only the nearby ink and preserves its distant tail")
 check(Screen.bb:pixel(110,210)==77 and Screen.bb:pixel(500,500)==99,
     "regional erasing restores original PDF pixels without disturbing distant content")
 check(Screen.bb:pixel(120,210)==0,
     "surviving intersecting ink is replayed after restoring the erased stroke's background")
-check(framebuffer_copies==copies_before_erase+1,
-    "content refresh rebuilds its clean snapshot from the freshly repainted PDF")
-check(erase_refresh.rect.x<=100 and erase_refresh.rect.x+erase_refresh.rect.w>=140
+check(framebuffer_copies==copies_before_erase,
+    "direct regional erasing retains the clean PDF snapshot without a reader repaint")
+check(erase_refresh.rect.x<=105 and erase_refresh.rect.x+erase_refresh.rect.w>=105
     and erase_refresh.rect.w<60 and erase_refresh.rect.h<100,
-    "erase refresh covers the changed stroke's old extent while preserving its partial survivors")
+    "erase refresh covers only the cut and cursor while preserving partial survivors")
 tapButton(persistent_overlay,"Pen")
 drawStroke(200,260,220,260)
 local count_before_rear=#store:page(1)
@@ -978,9 +979,10 @@ for _,cache_state in ipairs{"stale","missing"} do
     plugin:pollPen()
     local request=refreshes[#refreshes]
     check(#refreshes==requests_before+1 and request.w==ui and request.mode=="[partial]"
-        and request.rect.x<=100 and request.rect.x+request.rect.w>=430
-        and request.rect.y<=350 and request.rect.y+request.rect.h>=420,
-        cache_state.." cache schedules one content refresh covering the changed stroke's full former bounds")
+        and request.rect.x<=265 and request.rect.x+request.rect.w>=265
+        and request.rect.y<=385 and request.rect.y+request.rect.h>=385
+        and request.rect.w<60 and request.rect.h<60,
+        cache_state.." cache schedules a safe reader repaint for only the changed region")
     Manager:processRepaints()
     check(Manager:displayPixel(265,385)==255 and Manager:displayPixel(100,350)==0
         and Manager:displayPixel(430,420)==0 and Manager:displayPixel(325,550)==0
@@ -991,8 +993,12 @@ for _,cache_state in ipairs{"stale","missing"} do
         ..tostring(mx)..","..tostring(my))
     plugin:penEvent{phase="up",x=265,y=385,eraser=true}
     plugin:pollPen(); Manager:processRepaints()
-    check(#native_circles==circles_before and not plugin.eraser_cursor,
-        cache_state.." cache physical rear erasure never paints a visible circle")
+    check(plugin.eraser_cursor and #native_circles==circles_before,
+        cache_state.." cache physical rear erasure keeps the transient outline visible")
+    plugin:penEvent{phase="leave"}
+    plugin:pollPen(); Manager:processRepaints()
+    check(not plugin.eraser_cursor,
+        cache_state.." cache clears the cursor when the eraser leaves proximity")
 end
 check(avoid_flash_requests==0,
     "content erasure keeps its native partial waveform without the UI flash-avoidance downgrade")

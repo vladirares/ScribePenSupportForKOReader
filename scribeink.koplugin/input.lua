@@ -51,6 +51,7 @@ function Input.newDecoder(config)
     config = config or {}
     return setmetatable({
         has_touch = config.has_touch ~= false,
+        emit_hover = config.emit_hover == true,
         eraser_key = eraserKey(config),
         pressure_threshold = config.pressure_threshold or 0,
         pressure = 0,
@@ -62,6 +63,10 @@ end
 function Decoder:isEraser()
     return self.rubber or (self.eraser_key == CODE.BTN_STYLUS and self.barrel)
         or (self.eraser_key == CODE.BTN_STYLUS2 and self.barrel2)
+        -- Some firmware drops BTN_TOOL_RUBBER one report before pressure.
+        -- Keep the existing rear contact continuous until pressure falls to 0.
+        or (self.active and self.active_eraser and not self.pen
+            and self.pressure > self.pressure_threshold)
 end
 
 function Decoder:isToolPresent()
@@ -80,7 +85,7 @@ end
 function Decoder:emit(phase, callback, timestamp, cancelled, reason)
     local event = {
         phase = phase, x = self.x, y = self.y, pressure = self.pressure,
-        eraser = self.active_eraser or false,
+        eraser = (self.active and self.active_eraser) or (not self.active and self:isEraser()) or false,
         time = timestamp, cancelled = cancelled or nil, reason = reason,
     }
     if callback then callback(event) end
@@ -106,6 +111,7 @@ function Decoder:sync(snapshot)
     self.touch, self.barrel = snapshot.touch or false, snapshot.barrel or false
     self.barrel2 = snapshot.barrel2 or false
     self.blocked = self:isContact()
+    self.hover_present = self:isToolPresent()
     self.dirty = false
 end
 
@@ -126,6 +132,7 @@ function Decoder:report(callback, timestamp)
     if self.active and (not contact or eraser ~= self.active_eraser) then
         self:emit("up", callback, timestamp)
         self.active = false
+        self.active_eraser = nil
     end
     if contact and self.x ~= nil and self.y ~= nil then
         if not self.active then
@@ -135,7 +142,15 @@ function Decoder:report(callback, timestamp)
         elseif self.dirty then
             self:emit("move", callback, timestamp)
         end
+    elseif self.emit_hover then
+        -- Hover is feedback only; it must never be interpreted as ink contact.
+        if self:isToolPresent() and self.x ~= nil and self.y ~= nil and self.dirty then
+            self:emit("hover", callback, timestamp)
+        elseif self.hover_present and not self:isToolPresent() then
+            self:emit("leave", callback, timestamp)
+        end
     end
+    self.hover_present = self:isToolPresent()
     self.dirty = false
 end
 
@@ -427,6 +442,7 @@ function Input.open(config)
     local self = setmetatable({
         api = api, fd = chosen.fd, ranges = chosen.ranges, info = chosen.info,
         decoder = Input.newDecoder({ has_touch = chosen.info.has_touch, barrel_eraser = config.barrel_eraser,
+            emit_hover = config.emit_hover == true,
             eraser_key = config.eraser_key, pressure_threshold = chosen.ranges.pressure
                 and math.max(0, chosen.ranges.pressure.min) or 0 }),
         buffer = api.ffi.new("struct input_event[64]"),

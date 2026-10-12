@@ -259,10 +259,10 @@ check(erased_count == 0 and erased_bounds == nil, "empty eraser sweep needs no r
 reloaded:add(9, { width = 2, points = { { x = 0, y = 100 }, { x = 600, y = 100 } } })
 erased_count, erased_bounds = reloaded:erase(9, { x = 0, y = 100 }, { x = 0, y = 100 }, 1)
 check(erased_count == 1 and erased_bounds.x == -1 and erased_bounds.y == 99
-    and erased_bounds.w == 602 and erased_bounds.h == 2
+    and erased_bounds.w == 4 and erased_bounds.h == 2
     and #reloaded:page(9) == 1 and near(reloaded:page(9)[1].points[1].x, 2)
     and reloaded:page(9)[1].points[2].x == 600,
-    "tiny endpoint contact preserves most ink while refreshing the complete rasterized original extent")
+    "tiny endpoint contact preserves most ink and reports only its affected refresh bounds")
 
 store:beginUndo()
 check(store:erase(1, { x = 20, y = 0 }, { x = 20, y = 20 }, 1) == 1, "erase first stroke")

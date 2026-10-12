@@ -280,6 +280,88 @@ function Ink:clip()
     return {x=left,y=top,w=math.max(0,right-left),h=math.max(0,bottom-top)}
 end
 
+-- Use exactly the same physical screen radius for the outline and erasing.
+function Ink:eraserRadius()
+    return Screen:scaleBySize(10)+1
+end
+local function unionRect(a,b)
+    if not a then return b end
+    if not b then return a end
+    local x,y=math.min(a.x,b.x),math.min(a.y,b.y)
+    return {x=x,y=y,w=math.max(a.x+a.w,b.x+b.w)-x,
+        h=math.max(a.y+a.h,b.y+b.h)-y}
+end
+function Ink:cursorRect(cursor)
+    if not cursor then return nil end
+    local radius=cursor.radius+4
+    local x=math.max(0,math.floor(cursor.x-radius))
+    local y=math.max(0,math.floor(cursor.y-radius))
+    local right=math.min(Screen:getWidth(),math.ceil(cursor.x+radius+1))
+    local bottom=math.min(Screen:getHeight(),math.ceil(cursor.y+radius+1))
+    if right<=x or bottom<=y then return nil end
+    return {x=x,y=y,w=right-x,h=bottom-y}
+end
+-- Draw outlines only. paintCircle is a FILLED disc in KOReader and would
+-- cover underlying ink, misleading the user about what will be deleted.
+local function drawCircleOutline(bb,cx,cy,r,color)
+    local inner=(r-1)*(r-1)
+    for dy=-r,r do
+        local dx=math.floor(math.sqrt(math.max(0,r*r-dy*dy)))
+        local ix=-1
+        if math.abs(dy)<r then
+            ix=math.floor(math.sqrt(math.max(0,inner-dy*dy)))
+        end
+        local width=math.max(1,dx-ix)
+        bb:paintRect(cx-dx,cy+dy,width,1,color)
+        bb:paintRect(cx+ix+1,cy+dy,width,1,color)
+    end
+end
+function Ink:paintEraserCursor(bb,x,y)
+    local cursor=self.eraser_cursor
+    if not cursor then return end
+    local cx,cy=math.floor(cursor.x+(x or 0)+0.5),math.floor(cursor.y+(y or 0)+0.5)
+    -- White halo and dark ring; keep the center of the rubber transparent.
+    drawCircleOutline(bb,cx,cy,cursor.radius+1,Blitbuffer.COLOR_WHITE)
+    drawCircleOutline(bb,cx,cy,cursor.radius,Blitbuffer.COLOR_BLACK)
+end
+-- Recompose from the clean PDF snapshot, not from a screenshot containing old
+-- ink. Both the cut and the cursor move are painted into Screen.bb immediately.
+function Ink:updateEraserCursor(screen,changed_bounds,transform)
+    local old=self.eraser_cursor
+    local cursor
+    if screen then
+        local clip=self:clip()
+        local r=self:eraserRadius()
+        if Geometry.intersectsBounds({x=screen.x-r,y=screen.y-r,w=2*r,h=2*r},clip)
+            and not self.overlay.toolbar:hitTest(screen.x,screen.y) then
+            cursor={x=screen.x,y=screen.y,radius=r}
+        end
+    end
+    local changed_rect
+    if changed_bounds then
+        transform=transform or self:transform()
+        local a=Geometry.pageToScreen(changed_bounds,transform)
+        local b={x=a.x+changed_bounds.w*transform.zoom,y=a.y+changed_bounds.h*transform.zoom}
+        changed_rect=Render.bounds(a,b,4,self:clip())
+    end
+    local rect=unionRect(unionRect(self:cursorRect(old),self:cursorRect(cursor)),changed_rect)
+    self.eraser_cursor=cursor
+    if not rect then return end
+    transform=transform or self:transform()
+    local bb=Screen.bb
+    if bb and not Screen.forced_rotation and self.clean_bb
+        and self.clean_key==self:renderKey(transform) and bb.blitFrom then
+        bb:blitFrom(self.clean_bb,rect.x,rect.y,rect.x,rect.y,rect.w,rect.h)
+        self:paintStrokes(bb,transform,rect,0,0)
+        self:paintEraserCursor(bb,0,0)
+        self:protectToolbar(rect)
+        self:refreshRegion(rect,true)
+    else
+        -- No valid PDF snapshot yet: let KOReader do a safe authoritative paint.
+        UIManager:setDirty(self.ui,"[partial]",Geom:new(rect))
+    end
+end
+
 function Ink:calibrationKey()
     local rx,ry = self.adapter.ranges.x,self.adapter.ranges.y
     return table.concat({self.adapter.info.name,self.adapter.info.path,
@@ -303,7 +385,10 @@ function Ink:startWriting(recalibrate,automatic)
     -- Check that the destination is writable before collecting any strokes.
     self.store.dirty = true
     if not self:saveInk() then return end
-    local adapter,input_error = PenInput.open(self.settings.input or {})
+    local input_options={}
+    for key,value in pairs(self.settings.input or {}) do input_options[key]=value end
+    input_options.emit_hover=true -- only writing needs cursor events; tests/diagnostics retain contact-only behavior
+    local adapter,input_error = PenInput.open(input_options)
     if not adapter then message(gettext("Cannot open the Scribe pen: ")..tostring(input_error)); return end
     self.adapter = adapter
     self.writing=true; self.mode_error=nil
@@ -407,6 +492,17 @@ end
 
 function Ink:penEvent(event)
     if self.eraser_test then return end
+    if event.phase=="leave" then self:updateEraserCursor(nil); return end
+    if event.phase=="hover" then
+        if self.mapping and self:checkView() and UIManager:getTopmostVisibleWidget()==self.overlay
+            and (event.eraser or self.selected_tool=="eraser") then
+            self:updateEraserCursor(Calibration.apply(self.mapping,event))
+        else self:updateEraserCursor(nil) end
+        return
+    end
+    if event.phase=="down" and not (event.eraser or self.selected_tool=="eraser") then
+        self:updateEraserCursor(nil)
+    end
     if event.eraser then
         self.eraser_stats=self.eraser_stats or {decoded=0,accepted=0,hits=0,rejected={}}
         self.eraser_stats.decoded=self.eraser_stats.decoded+1
@@ -414,6 +510,7 @@ function Ink:penEvent(event)
     end
     self.pen_gate_until=time.now()+time.ms(150)
     if UIManager:getTopmostVisibleWidget() ~= self.overlay then
+        self:updateEraserCursor(nil)
         self:finishStroke()
         if self.calibration then self.calibration.contact=nil end
         self.suppressed = event.phase ~= "up"
@@ -422,6 +519,7 @@ function Ink:penEvent(event)
         return
     end
     if self.calibration then
+        self:updateEraserCursor(nil)
         self:recordEraserRejection(event,"calibration")
         if event.cancelled then
             self.calibration.contact=nil
@@ -477,10 +575,23 @@ function Ink:penEvent(event)
     if event.eraser then self.eraser_stats.last_screen=screen end
     if self.overlay.toolbar:hitTest(screen.x,screen.y) then
         if event.phase=="down" and not event.eraser then self.toolbar_contact=self.overlay.toolbar:hitTest(screen.x,screen.y) end
+        self:updateEraserCursor(nil)
         self:finishStroke(); self.suppressed=true; self:recordEraserRejection(event,"toolbar"); return
     end
-    if clip.w <= 0 or clip.h <= 0 or not Geometry.pointInRect(screen,clip) then
-        self:finishStroke(); self.suppressed=true; self:recordEraserRejection(event,"outside page"); return
+    local erasing=event.eraser or self.selected_tool=="eraser"
+    local r=self:eraserRadius()
+    local within=Geometry.pointInRect(screen,clip)
+    if erasing then
+        within=Geometry.intersectsBounds({x=screen.x-r,y=screen.y-r,w=2*r,h=2*r},clip)
+    end
+    if clip.w <= 0 or clip.h <= 0 or not within then
+        self:updateEraserCursor(nil)
+        -- Moving beyond the page must not permanently suppress a continuous
+        -- eraser gesture; the footprint may cross the edge and come back.
+        if event.phase=="down" or not erasing then
+            self:finishStroke(); self.suppressed=true
+        end
+        self:recordEraserRejection(event,"outside page"); return
     end
     local transform = self:transform()
     local point = Geometry.screenToPage(screen,transform)
@@ -505,10 +616,11 @@ function Ink:penEvent(event)
         self.eraser_stats.accepted=self.eraser_stats.accepted+1
         self.eraser_stats.last_page=point
         local changed,bounds = self.store:erase(stroke.page,stroke.last or point,point,
-            (Screen:scaleBySize(10)+1)/transform.zoom)
+            self:eraserRadius()/transform.zoom)
         stroke.last = point
         if changed then self.eraser_stats.hits=self.eraser_stats.hits+changed end
-        if changed and changed > 0 then self:restoreInkRegion(bounds,transform) end
+        -- Update even when there was no hit: the user always sees the footprint.
+        self:updateEraserCursor(screen,changed and changed>0 and bounds or nil,transform)
     else
         local last = stroke.points[#stroke.points]
         if not last or (point.x-last.x)^2+(point.y-last.y)^2 >= (0.6/transform.zoom)^2 then
@@ -569,12 +681,10 @@ function Ink:flushInkRefresh()
     self.refresh_rect,self.refresh_erase=nil,nil
     if not rect or not self.overlay then return end
     if erasing then
-        -- Erasing restores page grays as well as white. Redraw from the PDF
-        -- and current ink, then use its content waveform instead of pen DU.
-        -- One request per input batch also covers stale snapshots. The content
-        -- mode variant keeps KOReader's flash counter and UI-mode preferences
-        -- from changing the eraser's display waveform.
-        UIManager:setDirty(self.ui,"[partial]",Geom:new(rect))
+        -- The clean PDF background + surviving ink + cursor are already in bb.
+        -- Request ONLY an e-ink refresh (not an expensive ReaderUI repaint).
+        -- The page-content waveform clears the prior black strokes reliably.
+        UIManager:setDirty(nil,"[partial]",Geom:new(rect))
     else
         UIManager:setDirty(nil,"fast",Geom:new(rect))
     end
@@ -616,14 +726,9 @@ function Ink:paintStrokes(bb,transform,clip,x,y)
 end
 
 function Ink:restoreInkRegion(bounds,transform)
-    if not bounds then return end
-    local a=Geometry.pageToScreen(bounds,transform)
-    local b={x=a.x+bounds.w*transform.zoom,y=a.y+bounds.h*transform.zoom}
-    local rect=Render.bounds(a,b,2,self:clip())
-    if not rect then return end
-    -- The authoritative page repaint runs once at the end of the input batch.
-    -- Avoid replaying survivors from a potentially stale image for every sample.
-    self:refreshRegion(rect,true)
+    -- Kept for callers using the previous API; ordinary erasing passes the
+    -- cursor as well so only one recomposition is needed for a whole sample.
+    self:updateEraserCursor(self.eraser_cursor,bounds,transform)
 end
 
 function Ink:paintInk(bb,x,y)
@@ -638,6 +743,7 @@ function Ink:paintInk(bb,x,y)
 end
 
 function Ink:stopWriting(remove_toolbar)
+    if self.eraser_cursor then self:updateEraserCursor(nil) end
     self:closePenWidthPicker(false)
     if self.eraser_test_task then UIManager:unschedule(self.eraser_test_task); self.eraser_test_task=nil end
     self.eraser_test=false
@@ -682,7 +788,7 @@ function Ink:diagnostics()
     local info = adapter.info
     local rx,ry = adapter.ranges.x,adapter.ranges.y
     adapter:close()
-    message("Scribe Ink 0.4.0\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
+    message("Scribe Ink 0.4.1\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
         .."\nX: "..rx.min..".."..rx.max.."\nY: "..ry.min..".."..ry.max
         .."\nRear eraser event supported: "..tostring(info.has_rubber)
         .."\nInput source: "..tostring(info.source_hint or "unknown")
@@ -694,6 +800,7 @@ end
 
 function Ink:selectTool(tool)
     self:finishStroke()
+    if tool~="eraser" then self:updateEraserCursor(nil) end
     self.selected_tool=tool
     if not self.writing then self:startWriting() end
     if self.overlay then self.overlay:updateStatus() end
@@ -733,10 +840,10 @@ function Ink:onCloseDocument() self:closeReader() end
 function Ink:onClose() self:closeReader() end
 function Ink:onFlushSettings() self:finishStroke(); self:saveInk(); self:saveSettings() end
 function Ink:onExit() self:closeReader() end
-function Ink:onPageUpdate() self:finishStroke(); self:invalidateCache(); if self.overlay then self.overlay:updateStatus() end end
-function Ink:onZoomUpdate() self:finishStroke(); self:invalidateCache() end
+function Ink:onPageUpdate() self:finishStroke(); self.eraser_cursor=nil; self:invalidateCache(); if self.overlay then self.overlay:updateStatus() end end
+function Ink:onZoomUpdate() self:finishStroke(); self.eraser_cursor=nil; self:invalidateCache() end
 function Ink:onSetDimensions()
-    self:finishStroke(); self:invalidateCache()
+    self:finishStroke(); self.eraser_cursor=nil; self:invalidateCache()
     if self.overlay then self.overlay.dimen=Screen:getSize(); self.overlay:updateStatus() end
 end
 
@@ -791,6 +898,7 @@ end
 
 function Overlay:paintTo(bb,x,y)
     self.toolbar:paintTo(bb,x,y)
+    self.owner:paintEraserCursor(bb,x,y)
     if self.status then
         local size=self.status:getSize()
         bb:paintRect(x+Screen:getWidth()*0.1,y,Screen:getWidth()*0.8,size.h,Blitbuffer.COLOR_WHITE)

@@ -1,8 +1,10 @@
-# Scribe Ink 0.4.0
+# Scribe Ink 0.4.1
 
 An installable KOReader plugin for freehand PDF handwriting on a jailbroken Kindle Scribe. A compact, collapsible left-side dock offers Pen, Erase, Undo, PDF export, and the KOReader menu. Tap Pen to choose a line width. Fingers navigate normally; the pen writes automatically, with palm rejection while the pen is nearby.
 
-Designed for the user's Kindle Scribe 2024, firmware **5.19.6**, and **KOReader 2026.07.1**. The user confirmed faster writing, the left dock, and rear-eraser input in earlier releases. **0.4.0 still needs confirmation on the device.** It changes the eraser's geometry and display updates while preserving the fast pen-writing path.
+Designed for the user's Kindle Scribe 2024, firmware **5.19.6**, and **KOReader 2026.07.1**. The user confirmed faster writing, the left dock, and rear-eraser input in earlier releases. **0.4.1 still needs confirmation on the device.** It adds a transient eraser footprint, tolerates a short rear-tool key dropout during contact, and recomposes just the affected screen region from the clean PDF snapshot.
+
+Version **0.4.1** shows a thin white halo and dark outline around the active rear eraser or selected tip eraser; the cursor is transient and is never saved to notes or exported PDFs. Erasing recomposes the cut and surviving ink directly from the clean page snapshot and asks KOReader to refresh that screen region without repainting the full reader page. The input decoder keeps a pressured rear-erasing contact continuous if firmware briefly drops `BTN_TOOL_RUBBER`.
 
 Version **0.4.0** erases only the crossed section of ink, splitting a line into surviving paths. One Undo restores an entire eraser gesture. The black eraser cursor is removed completely. Successful erasures redraw the affected strokes from the actual PDF and current ink, and request the page-content display waveform, instead of relying only on a cached-area monochrome refresh. This addresses lingering ink and covers stale-snapshot and display-update causes; the earlier hardware observation does not distinguish those causes. Refresh requests are combined once per input batch, without advancing KOReader's page-flash counter. The pen icon opens a small picker for **0.75, 1.25, 2, or 3 pt**; the selected width is saved for new strokes.
 
@@ -15,7 +17,7 @@ Version **0.1.1** fixes the missing Scribe Ink menu reported by the user. In 0.1
 ## Install
 
 1. Exit KOReader and connect the Kindle to the computer over USB.
-2. Open `scribeink-0.4.0-install.zip`. Copy the **entire `scribeink.koplugin` folder** into your existing `koreader/plugins/` folder on the Kindle, replacing the previous version if installed. A usual location is `/mnt/us/koreader/plugins/`; some launchers place KOReader elsewhere. Find the folder that already contains other `.koplugin` folders.
+2. Open `scribeink-0.4.1-install.zip`. Copy the **entire `scribeink.koplugin` folder** into your existing `koreader/plugins/` folder on the Kindle, replacing the previous version if installed. A usual location is `/mnt/us/koreader/plugins/`; some launchers place KOReader elsewhere. Find the folder that already contains other `.koplugin` folders.
 3. Confirm this structure, without an extra nested folder:
 
    ```text
@@ -39,7 +41,7 @@ Use single-page PDF view, with reflow off and **PDF page rotation set to 0**. Sc
 
 On the first start, tap each of the three displayed crosses once with the pen **tip**, lifting between taps. Calibration handles swapped, reversed, and differently scaled digitizer axes. It is saved for each screen orientation and input device. Use **Recalibrate pen** if handwriting is offset.
 
-- Write with the pen tip automatically. Flip the pen and touch the page with its rear eraser to erase. The eraser does not draw a border or cursor on the page.
+- Write with the pen tip automatically. Flip the pen and touch the page with its rear eraser to erase. A transient eraser cursor shows the footprint with a thin white halo and dark outline; it is not part of saved ink.
 - Tap **Erase** to erase using the tip. This is also a usable fallback when the physical rear signal is unavailable. Tap **Pen** to return to writing.
 - Erasing removes the **part of handwriting beneath the eraser**, leaving the rest of each stroke. Fast sweeps are continuous between input samples, and sparse lines are split at interpolated cut points. This applies to existing sidecar notes as well as new ink. Printed PDF content and annotations made in other applications remain intact.
 - **Undo** reverses one pen stroke or one eraser gesture. Undo history is limited to the current open-document session, up to 100 actions.
@@ -77,7 +79,7 @@ Runtime capability checks protect older/mismatched builds. Native ink export req
 
 **Writing works but the rear eraser does not:** 0.2.0 recognizes pressure contact from an identified eraser even when its driver omits `BTN_TOUCH`. It also supports explicit **Rear eraser signal** selection: rubber tool (default), stylus button 1, or stylus button 2. Do not select a button mapping unless the diagnostic capture shows that the rear eraser actually uses it; those buttons can be the pen's side buttons on other devices.
 
-For the supplied Scribe log, leave **Rear rubber tool (default)** selected. The observed signal is already correct. Touch and move the rear eraser across a freshly written line on the same original PDF. The crossed section should disappear without changing pages, leaving ink on both sides. There is no eraser cursor in 0.4.0. The log adds `Scribe Ink eraser stroke` entries with decoded/accepted samples, altered-stroke count, rejection reasons, and raw/screen/page coordinates. If it still fails, share the updated log after this ordinary erase attempt.
+For the supplied Scribe log, leave **Rear rubber tool (default)** selected. The observed signal is already correct. Touch and move the rear eraser across a freshly written line on the same original PDF. The crossed section should disappear without changing pages, leaving ink on both sides. Version 0.4.1 shows a transient eraser cursor while the rear rubber is in proximity or while the tip eraser is selected. The log adds `Scribe Ink eraser stroke` entries with decoded/accepted samples, altered-stroke count, rejection reasons, and raw/screen/page coordinates. If it still fails, share the updated log after this ordinary erase attempt.
 
 Choose **Scribe Ink → Test rear eraser (10 seconds)**. While its instruction is visible, repeatedly touch and lift the rear eraser on the page for ten seconds. Handwriting capture pauses during the test. The resulting raw key/pressure summary appears on screen and is written to `crash.log`. Share that summary or the updated log to identify the correct signal. The capture records even events that did not become a recognized stroke. You can use **Erase** with the tip meanwhile. Ordinary finger touches never become eraser strokes.
 
@@ -96,7 +98,7 @@ python -m pip install -r tests/requirements.txt
 python tests/run_tests.py
 ```
 
-Checks cover coherent pen frames, hover/contact distinction, rear eraser pressure fallback and button mapping, a representative replay of the user's logged rear-key sequence, raw diagnostics, native pen-slot suppression and callback ownership, input overruns and disconnects, descriptor cleanup, calibration, clipped line pixels, page transforms, partial erasure of sparse and curved paths, exact grouped undo, saved/reopened fragments, storage failures, checksum checks, backup recovery, internal KOReader PDF writes, compact dock hit areas, the pen-width picker, unified finger/pen interaction, screen-refresh dispatch, and deferred saving. PDF tests also check real exported annotation gaps, searchable text, original annotations, cropped/rotated pages, and failure paths. Native KOReader export is exercised against a mocked API; actual PDF output is exercised with the companion desktop exporter. The newest integration remains unverified on physical hardware.
+Checks cover coherent pen frames, hover/contact distinction, rear eraser pressure fallback, short rubber-key dropout tolerance and button mapping, a representative replay of the user's logged rear-key sequence, raw diagnostics, native pen-slot suppression and callback ownership, input overruns and disconnects, descriptor cleanup, calibration, clipped line pixels, page transforms, partial erasure of sparse and curved paths, exact grouped undo, saved/reopened fragments, storage failures, checksum checks, backup recovery, internal KOReader PDF writes, compact dock hit areas, eraser-footprint feedback, the pen-width picker, unified finger/pen interaction, screen-refresh dispatch, and deferred saving. PDF tests also check real exported annotation gaps, searchable text, original annotations, cropped/rotated pages, and failure paths. Native KOReader export is exercised against a mocked API; actual PDF output is exercised with the companion desktop exporter. The newest integration remains unverified on physical hardware.
 
 Primary integration references:
 

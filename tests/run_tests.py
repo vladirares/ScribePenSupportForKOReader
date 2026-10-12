@@ -48,7 +48,7 @@ if __name__ == '__main__':
     for path in sorted((ROOT / 'scribeink.koplugin').glob('*.lua')):
         compile_lua(str(path))
     print('All plugin files compile under LuaJIT 2.1', flush=True)
-    for name in ('test_input.lua', 'test_input_adapter.lua', 'test_coreinput.lua', 'test_model.lua', 'test_render.lua', 'test_toolbar.lua', 'test_ui.lua'):
+    for name in ('test_input.lua', 'test_eraser_feedback.lua', 'test_input_adapter.lua', 'test_coreinput.lua', 'test_model.lua', 'test_render.lua', 'test_toolbar.lua', 'test_ui.lua'):
         path = ROOT / 'tests' / name
         if path.exists():
             count = runtime().execute('return dofile(...)', str(path))
