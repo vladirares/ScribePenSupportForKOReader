@@ -479,16 +479,32 @@ end
 function Ink:finishStroke()
     local stroke = self.stroke
     if not stroke then return end
-    if stroke.eraser and self.eraser_cursor then
-        -- Recompose the last footprint before requesting the release flash.
-        -- Doing this while the eraser stroke is still active also records the
-        -- final dirty footprint in eraser_cleanup_rect.
-        self:updateEraserCursor(nil)
-    end
+    -- A held eraser now uses exactly the pen's cheap incremental paint path.
+    -- The expensive vector cuts and PDF restoration happen ONCE on release.
     self.stroke = nil
     if stroke.eraser then
+        local changed = self.store:erasePath(stroke.page,stroke.erase_path or {},
+            self:eraserRadius()/stroke.transform.zoom)
+        if self.eraser_stats and changed then
+            self.eraser_stats.hits=self.eraser_stats.hits+changed
+        end
         self.store:endUndo()
-        self:scheduleEraserCleanup()
+        local rect=stroke.erase_rect
+        if rect then
+            self.eraser_cleanup_rect=unionRect(self.eraser_cleanup_rect,rect)
+            local bb=Screen.bb
+            if bb and not Screen.forced_rotation and self.clean_bb
+                and self.clean_key==self:renderKey(stroke.transform) and bb.blitFrom then
+                bb:blitFrom(self.clean_bb,rect.x,rect.y,rect.x,rect.y,rect.w,rect.h)
+                self:paintStrokes(bb,stroke.transform,rect,0,0)
+                self:protectToolbar(rect)
+                self:refreshRegion(rect,true)
+            else
+                -- Never leave the temporary white mask stuck on the PDF.
+                UIManager:setDirty(self.ui,"ui",Geom:new(rect))
+            end
+            self:scheduleEraserCleanup()
+        end
     elseif #stroke.points > 0 then
         local added,err = self.store:add(stroke.page,{width=stroke.width,points=stroke.points})
         if not added then
@@ -659,9 +675,14 @@ function Ink:penEvent(event)
             self.eraser_cleanup_task=nil
         end
         if self.save_task then UIManager:unschedule(self.save_task); self.save_task=nil end
+        -- Remove the last hover preview once, not once per contact sample.
+        if erasing and self.eraser_cursor then self:updateEraserCursor(nil) end
         self.stroke = {page=transform.page,width=self.settings.width,points={},
             eraser=event.eraser or self.selected_tool=="eraser",transform=transform}
-        if self.stroke.eraser then self.store:beginUndo() end
+        if self.stroke.eraser then
+            self.stroke.erase_path={}
+            self.store:beginUndo()
+        end
     end
     local stroke = self.stroke
     if not stroke then return end
@@ -676,12 +697,14 @@ function Ink:penEvent(event)
         self.eraser_stats=self.eraser_stats or {decoded=0,accepted=0,hits=0,rejected={}}
         self.eraser_stats.accepted=self.eraser_stats.accepted+1
         self.eraser_stats.last_page=point
-        local changed,bounds = self.store:erase(stroke.page,stroke.last or point,point,
-            self:eraserRadius()/transform.zoom)
-        stroke.last = point
-        if changed then self.eraser_stats.hits=self.eraser_stats.hits+changed end
-        -- Update even when there was no hit: the user always sees the footprint.
-        self:updateEraserCursor(screen,changed and changed>0 and bounds or nil,transform)
+        local last=stroke.erase_path[#stroke.erase_path]
+        -- Retain points for accurate end-of-gesture geometry, but make every
+        -- visible movement just one small white capsule in Screen.bb.
+        if not last or (point.x-last.x)^2+(point.y-last.y)^2 >= (0.6/transform.zoom)^2 then
+            stroke.erase_path[#stroke.erase_path+1]=point
+            self:drawEraserSweep(stroke.last_screen or screen,screen,stroke)
+            stroke.last_screen=screen
+        end
     else
         local last = stroke.points[#stroke.points]
         if not last or (point.x-last.x)^2+(point.y-last.y)^2 >= (0.6/transform.zoom)^2 then
@@ -749,6 +772,17 @@ function Ink:flushInkRefresh()
     UIManager:setDirty(nil,"fast",Geom:new(rect))
 end
 
+-- Identical hot path to writing: one screen-space capsule, one queued fast
+-- waveform. No PDF blit, paintStrokes, or Store:erase on movement.
+function Ink:drawEraserSweep(a,b,stroke)
+    if not Screen.bb or Screen.forced_rotation then return end
+    local rect=Render.line(Screen.bb,a,b,2*self:eraserRadius(),
+        Blitbuffer.COLOR_WHITE,self:clip())
+    if not rect then return end
+    stroke.erase_rect=unionRect(stroke.erase_rect,rect)
+    self:refreshRegion(rect,true)
+    self:protectToolbar(rect)
+end
 function Ink:drawNewSegment(a,b,width,transform)
     if not Screen.bb or Screen.forced_rotation or self.clean_key~=self:renderKey(transform) then
         UIManager:setDirty(self.ui,"fast"); return
@@ -847,7 +881,7 @@ function Ink:diagnostics()
     local info = adapter.info
     local rx,ry = adapter.ranges.x,adapter.ranges.y
     adapter:close()
-    message("Scribe Ink 0.4.5\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
+    message("Scribe Ink 0.4.6\n"..tostring(Device.model).."\n"..info.path.."\n"..info.name
         .."\nX: "..rx.min..".."..rx.max.."\nY: "..ry.min..".."..ry.max
         .."\nRear eraser event supported: "..tostring(info.has_rubber)
         .."\nInput source: "..tostring(info.source_hint or "unknown")

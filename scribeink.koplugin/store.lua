@@ -263,6 +263,33 @@ function Store:erase(page, a, b, radius)
     return changed, affected
 end
 
+-- One replacement and one grouped undo operation per original stroke,
+-- regardless of how many eraser samples crossed it.
+function Store:erasePath(page,path,radius)
+    if not positiveInteger(page) or not finite(radius) or radius<0
+        or type(path)~="table" then return nil,"Invalid eraser path" end
+    local strokes=self.pages[page]
+    if not strokes or #path==0 then return 0 end
+    local changed,affected,local_group=0,nil,not self.undo_group
+    if local_group then self:beginUndo() end
+    for i=#strokes,1,-1 do
+        local fragments,bounds=Geometry.eraseStrokePath(strokes[i],path,radius)
+        if fragments then
+            local removed=table.remove(strokes,i)
+            for j=#fragments,1,-1 do table.insert(strokes,i,fragments[j]) end
+            self:_record({action="replace",page=page,index=i,
+                stroke=removed,count=#fragments})
+            affected=affected and {x=math.min(affected.x,bounds.x),
+                y=math.min(affected.y,bounds.y),
+                w=math.max(affected.x+affected.w,bounds.x+bounds.w)-math.min(affected.x,bounds.x),
+                h=math.max(affected.y+affected.h,bounds.y+bounds.h)-math.min(affected.y,bounds.y)} or bounds
+            changed=changed+1
+        end
+    end
+    if local_group then self:endUndo() end
+    return changed,affected
+end
+
 function Store:undo()
     self:endUndo()
     local group = table.remove(self.undo_stack)

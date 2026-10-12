@@ -849,12 +849,13 @@ check(#refreshes==after_preview,"unchanged hover does not request another screen
 check(Manager:displayPixel(100,210)==0, "erasure begins from actually presented handwriting")
 plugin:penEvent{phase="down",x=105,y=210,eraser=false}
 plugin:pollPen()
-check(plugin.eraser_cursor and not plugin.eraser_cursor.hover,
-    "contact replaces hover preview with the white eraser at identical coordinates")
+check(plugin.stroke and plugin.stroke.eraser and not plugin.eraser_cursor
+    and #plugin.stroke.erase_path==1,
+    "eraser contact queues geometry while painting its temporary mask")
 local radius=plugin:eraserRadius()
-check(#native_circles>circles_before_erase and Screen.bb:pixel(105,210)==255
+check(#native_circles==circles_before_erase and Screen.bb:pixel(105,210)==255
     and Screen.bb:pixel(105+radius-1,210)==255,
-    "eraser contact paints a solid white disc through its center and rim")
+    "fast capsule paints an opaque eraser footprint without costly cursor redraw")
 check(plugin.eraser_cleanup_task==nil,
     "active erasing does not schedule a flashing refresh before release")
 local erase_refresh=refreshes[#refreshes]
@@ -862,16 +863,20 @@ check(erase_refresh.w==nil and erase_refresh.mode=="fast" and plugin.stroke and 
     "active eraser contact requests a direct fast refresh before lift or page navigation (reader="
         ..tostring(erase_refresh.w==ui)..", mode="..tostring(erase_refresh.mode)..", stroke="
         ..tostring(plugin.stroke and plugin.stroke.eraser)..")")
-check(framebuffer_copies==copies_before_erase and #native_blits>blits_before_erase,
-    "eraser recomposes the affected screen region from the clean snapshot without repainting the PDF")
+local blits_during_contact=#native_blits
+local stored_during_contact=#store:page(1)
+plugin:penEvent{phase="move",x=106,y=210,eraser=false}
+check(framebuffer_copies==copies_before_erase and #native_blits==blits_during_contact
+    and #store:page(1)==stored_during_contact,
+    "movement paints incrementally without touching saved strokes or blitting the PDF")
 Manager:processRepaints()
 check(Manager:displayPixel(100,210)==255 and Manager:displayPixel(140,210)==0
     and Manager:displayPixel(110,210)==255 and view.state.page==1,
     "erasing is visible immediately on the physical display and preserves the uncontacted tail")
 plugin:penEvent{phase="move",x=105,y=210,eraser=false}
 plugin:penEvent{phase="up",x=105,y=210,eraser=false}
-check(#native_circles>circles_before_erase and not plugin.eraser_cursor,
-    "filled eraser footprint is restored from PDF on release")
+check(#native_blits>blits_during_contact and not plugin.eraser_cursor,
+    "release restores PDF and ink with one regional blit")
 check(Screen.bb:pixel(100,210)==255 and Screen.bb:pixel(140,210)==0,
     "touching one endpoint clears only the nearby ink and preserves its distant tail")
 check(Screen.bb:pixel(110,210)==77 and Screen.bb:pixel(500,500)==99,
@@ -1018,18 +1023,18 @@ for _,cache_state in ipairs{"stale","missing"} do
     local circles_before=#native_circles
     local blits_before=#native_blits
     plugin:penEvent{phase="down",x=265,y=385,eraser=true}
-    check(#store:page(1)==3 and plugin.stroke and plugin.stroke.eraser,
-        cache_state.." cache still clips sparse source ink into two partial survivors")
+    check(#store:page(1)==2 and plugin.stroke and plugin.stroke.eraser,
+        cache_state.." cache records geometry only on release")
     check(Manager:displayPixel(265,385)==0 and #native_blits==blits_before,
         cache_state.." cache does not confuse pending framebuffer work with a completed physical refresh")
     local requests_before=#refreshes
     plugin:pollPen()
     local request=refreshes[#refreshes]
-    check(#refreshes==requests_before+1 and request.w==ui and request.mode=="ui"
+    check(#refreshes==requests_before+1 and request.w==nil and request.mode=="fast"
         and request.rect.x<=265 and request.rect.x+request.rect.w>=265
         and request.rect.y<=385 and request.rect.y+request.rect.h>=385
         and request.rect.w<60 and request.rect.h<60,
-        cache_state.." cache schedules a safe reader repaint for only the changed region")
+        cache_state.." cache uses a fast direct framebuffer refresh on contact")
     Manager:processRepaints()
     check(Manager:displayPixel(265,385)==255 and Manager:displayPixel(100,350)==0
         and Manager:displayPixel(430,420)==0 and Manager:displayPixel(325,550)==0
@@ -1040,8 +1045,9 @@ for _,cache_state in ipairs{"stale","missing"} do
         ..tostring(mx)..","..tostring(my))
     plugin:penEvent{phase="up",x=265,y=385,eraser=true}
     plugin:pollPen(); Manager:processRepaints()
-    check(not plugin.eraser_cursor and #native_circles==circles_before,
-        cache_state.." cache eraser outline is hidden on release")
+    check(#store:page(1)==3 and not plugin.eraser_cursor
+        and #native_circles==circles_before,
+        cache_state.." cache commits geometry and removes the mask on release")
     local before_hover=#refreshes
     plugin:penEvent{phase="hover",x=265,y=385,eraser=true}
     plugin:pollPen(); Manager:processRepaints()

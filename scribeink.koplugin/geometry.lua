@@ -194,6 +194,94 @@ function Geometry.eraseStroke(stroke, a, b, radius)
         w = maxx - minx + 2 * padding, h = maxy - miny + 2 * padding }
 end
 
+-- Apply an entire eraser gesture to an ORIGINAL stroke in one pass. Repeated
+-- Store:erase calls fragment strokes after every sample and make the next
+-- sample increasingly expensive; this makes one fragment set per source path.
+function Geometry.eraseStrokePath(stroke,path,radius)
+    local points,width=stroke.points,stroke.width or 0
+    if not points or #points==0 or not path or #path==0 then return nil end
+    local minx,miny,maxx,maxy=path[1].x,path[1].y,path[1].x,path[1].y
+    for i=2,#path do
+        local p=path[i]
+        minx,miny=math.min(minx,p.x),math.min(miny,p.y)
+        maxx,maxy=math.max(maxx,p.x),math.max(maxy,p.y)
+    end
+    local reach=radius+width/2
+    if not Geometry.intersectsBounds(Geometry.bounds(stroke),
+        {x=minx-reach,y=miny-reach,w=maxx-minx+2*reach,h=maxy-miny+2*reach}) then return nil end
+    local function contact(p,q,a,b)
+        -- Cheap broad-phase before the much more expensive capsule math.
+        if math.max(p.x,q.x)+reach < math.min(a.x,b.x)
+            or math.min(p.x,q.x)-reach > math.max(a.x,b.x)
+            or math.max(p.y,q.y)+reach < math.min(a.y,b.y)
+            or math.min(p.y,q.y)-reach > math.max(a.y,b.y) then return nil end
+        return capsuleInterval(p,q,a,b,reach)
+    end
+    if #points==1 then
+        for j=1,#path do
+            local a,b=path[j-1] or path[j],path[j]
+            if Geometry.segmentDistance2(points[1].x,points[1].y,points[1].x,points[1].y,
+                a.x,a.y,b.x,b.y)<=reach*reach then
+                return {},Geometry.bounds(stroke)
+            end
+        end
+        return nil
+    end
+    local fragments,current,changed={},nil,false
+    local ax,ay,bx,by
+    local function affected(p)
+        ax,ay=math.min(ax or p.x,p.x),math.min(ay or p.y,p.y)
+        bx,by=math.max(bx or p.x,p.x),math.max(by or p.y,p.y)
+    end
+    local function append(p)
+        if not current then current={width=width,points={}} end
+        local last=current.points[#current.points]
+        if not last or last.x~=p.x or last.y~=p.y then
+            current.points[#current.points+1]={x=p.x,y=p.y}
+        end
+    end
+    local function finish()
+        if current then fragments[#fragments+1]=current;current=nil end
+    end
+    for i=2,#points do
+        local p,q=points[i-1],points[i]
+        local cuts={}
+        local dx,dy=q.x-p.x,q.y-p.y
+        local length=math.sqrt(dx*dx+dy*dy)
+        for j=1,#path do
+            local a,b=path[j-1] or path[j],path[j]
+            local lo,hi=contact(p,q,a,b)
+            if lo and ((lo==0 and hi==1) or (hi-lo)*length>1e-9) then
+                cuts[#cuts+1]={lo,hi}
+            end
+        end
+        if #cuts==0 then
+            append(p);append(q)
+        else
+            table.sort(cuts,function(a,b) return a[1]<b[1] end)
+            local cutoff=0
+            for _,cut in ipairs(cuts) do
+                local lo,hi=math.max(cutoff,cut[1]),cut[2]
+                if hi>cutoff then
+                    if lo>cutoff then
+                        append(interpolate(p,q,cutoff))
+                        append(interpolate(p,q,lo))
+                    end
+                    finish()
+                    affected(interpolate(p,q,lo));affected(interpolate(p,q,hi))
+                    changed=true
+                    cutoff=hi
+                end
+            end
+            if cutoff<1 then append(interpolate(p,q,cutoff));append(q) end
+        end
+    end
+    if not changed then return nil end
+    finish()
+    local pad=width/2
+    return fragments,{x=ax-pad,y=ay-pad,w=bx-ax+2*pad,h=by-ay+2*pad}
+end
+
 -- Liang-Barsky clipping. Returned endpoints retain the segment's direction.
 function Geometry.clipSegment(a, b, rect)
     local dx, dy, t0, t1 = b.x - a.x, b.y - a.y, 0, 1
